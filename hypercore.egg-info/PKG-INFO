@@ -1,8 +1,0 @@
-Metadata-Version: 2.1
-Name: hypercore
-Version: 0.1.0
-Summary: HyperCore - Hyperbolic Deep Learning Library
-Author: HyperCore Team
-Author-email: example@example.com
-Requires-Python: >=3.6
-License-File: LICENSE
