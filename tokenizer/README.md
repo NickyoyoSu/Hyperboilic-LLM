@@ -3,7 +3,7 @@
 This directory contains a compact research codebase for training autoencoders and VQ-VAE models in hyperbolic geometry (Lorentz model). It includes:
 
 - A Euclidean encoder/decoder with hyperbolic mappings
-- Two flavors of hyperbolic tokenizers (simple distance-based and polar/cluster-aware)
+- A work-in-progress hyperbolic tokenizer pipeline (current experiments use AE-pretrained features to train VQ-VAE and tune loss ratios)
 - A hyperbolic VQ-VAE training loop with curvature scheduling, visualization, and codebook analytics
 - An AE pretraining pipeline and tools to train/evaluate tokenizers using the AE
 
@@ -12,7 +12,7 @@ If you are new here, start with AE pretraining, then train the hyperbolic VQ-VAE
 ## Repository Structure
 
 ```text
-polar/
+./
   main_hyp.py                  # Train Hyperbolic VQ-VAE (Accelerate-ready)
   train_autoencoder.py         # Pretrain AE (Accelerate-ready)
   evaluate_autoencoder.py      # Evaluate AE recon quality (PSNR/SSIM/MSE/FID)
@@ -43,10 +43,15 @@ polar/
 ## Key Ideas
 
 - Lorentz model hyperbolic geometry is used throughout. Encoder lifts Euclidean features to Lorentz points; decoder maps back.
-- Tokenization happens directly in hyperbolic space:
-  - StandardHyperbolicQuantizer: a single codebook of Lorentz points; nearest neighbor by true hyperbolic distance (robust, simple, good baseline).
-  - VectorQuantizer (polar) and ClusterAwareVectorQuantizer (polar + clustering): decompose into radius r and unit direction w, then reconstruct a Lorentz point. Offers finer control of radial/angular usage and optional EMA/cluster-aware updates.
+- Tokenization is experimental. Current training uses a simple distance-based hyperbolic codebook while the polar/cluster-aware tokenizer remains incomplete.
 - Training utilities include perceptual/color losses, curvature adaptation, diversity/codebook regularization, dead-code reset, and rich plotting.
+
+## Current Status and Known Issues
+
+- The intended hyperbolic tokenizer is not finalized. Current experiments initialize from a pretrained AE and train VQ-VAE by tuning existing loss weights.
+- Severe issue observed: the codebook distribution becomes too narrow (average radius shrinks over training), leading to color desaturation/monotony and eventual training collapse.
+- Early training can already yield coarse reconstructions, but instability increases as the codebook concentrates.
+- Because of the above, statements implying a complete tokenizer are removed or toned down in this README. Treat tokenizer components as experimental.
 
 ## Installation
 
@@ -83,7 +88,7 @@ You can customize loaders in `utils.py` if your layout differs. For quick functi
 ### 1) Pretrain the Autoencoder (AE)
 
 ```bash
-accelerate launch /ext/work/polar/train_autoencoder.py \
+accelerate launch train_autoencoder.py \
   --dataset IMAGENET \
   --batch_size 32 \
   --effective_batch_size 256 \
@@ -91,17 +96,35 @@ accelerate launch /ext/work/polar/train_autoencoder.py \
   --learning_rate 3e-3 \
   --adaptive_c \
   --initial_c 1.0 \
-  --output_dir /ext/work/pretrained_autoencoder
+  --output_dir ./pretrained_autoencoder
 ```
 
 This produces an AE checkpoint (encoder/decoder weights and curvature when enabled) used to warm-start the VQ-VAE training.
+
+### 1b) Pretrain the Euclidean Autoencoder (baseline)
+
+The codebase also provides a Euclidean AE baseline which currently delivers better reconstruction quality than the hyperbolic AE in our experiments.
+
+```bash
+accelerate launch train_autoencoder_euc.py \
+  --dataset IMAGENET \
+  --batch_size 32 \
+  --effective_batch_size 256 \
+  --epochs 30 \
+  --learning_rate 3e-3 \
+  --output_dir ./pretrained_autoencoder_euc
+```
+
+Notes:
+- This trains `models/AE_euc.py` with `models/encoder_euc.py` and `models/decoder_euc.py`.
+- The resulting checkpoint structure differs from the hyperbolic AE and is not drop‑in compatible with `main_hyp.py`'s Lorentz encoder/decoder. Use the hyperbolic AE checkpoint for `--pretrained_path` in VQ-VAE.
 
 ### 2) Train the Hyperbolic VQ-VAE
 
 Standard single-GPU (use absolute paths):
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 accelerate launch /ext/work/polar/main_hyp.py \
+CUDA_VISIBLE_DEVICES=0 accelerate launch main_hyp.py \
   --dataset IMAGENET \
   --batch_size 8 \
   --effective_batch_size 256 \
@@ -115,14 +138,14 @@ CUDA_VISIBLE_DEVICES=0 accelerate launch /ext/work/polar/main_hyp.py \
   --initial_c 1.0 \
   --use_lr_scheduler \
   --lr_scheduler plateau \
-  --output_dir /ext/work/vqvae_results_with_ae \
+  --output_dir ./vqvae_results_with_ae \
   --save \
   --save_interval 50000 \
   --val_interval 2000 \
   --log_interval 100 \
   --monitor_interval 400 \
   --visualization_interval 2000 \
-  --pretrained_path /ext/work/pretrained_autoencoder/epoch_1_autoencoder.pth \
+  --pretrained_path ./pretrained_autoencoder/epoch_1_autoencoder.pth \
   --fp16
 ```
 
@@ -138,7 +161,7 @@ Outputs (by default under `--output_dir`):
 ### 3) (Optional) Reconstruct Images
 
 ```bash
-python -u /ext/work/polar/reconstruct_images.py \
+python -u reconstruct_images.py \
   --checkpoint /path/to/checkpoint.pth \
   --input_dir /path/to/images \
   --output_dir /path/to/recons
@@ -147,12 +170,12 @@ python -u /ext/work/polar/reconstruct_images.py \
 ### 4) Evaluate AE Reconstruction Quality
 
 ```bash
-python -u /ext/work/polar/evaluate_autoencoder.py \
-  --checkpoint /ext/work/pretrained_autoencoder/best.pth \
+python -u evaluate_autoencoder.py \
+  --checkpoint ./pretrained_autoencoder/best.pth \
   --val_dir /ext/imagenet/val \
   --batch_size 8 \
   --num_samples 10000 \
-  --output_dir /ext/work/eval_ae
+  --output_dir ./eval_ae
 ```
 
 Metrics include PSNR, SSIM, MSE, and FID (via clean-fid). The script saves real/reconstruction images to compute FID.
