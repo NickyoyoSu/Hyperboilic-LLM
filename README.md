@@ -1,6 +1,6 @@
 # Hyperbolic Foundation Models Repository
 
-**A comprehensive research codebase for hyperbolic geometry in deep learning and foundation models across multiple modalities.**
+**A comprehensive codebase for ongoing research in hyperbolic geometry for deep learning and foundational models across multiple modalities**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
