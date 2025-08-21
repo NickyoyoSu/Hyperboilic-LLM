@@ -77,7 +77,7 @@ def calc_loss_with_regularization(x, x_hat, z_e_hyp, embedding_loss, diversity_l
         mean_radius_reg = (radius.mean() - 5.0)**2
         reg_loss = current_lambda_reg * (0.5 * radius_std_reg + 0.3 * mean_radius_reg)
 
-    # Total Loss - 关键修复：应用所有新的权重
+    
     total_loss = (args.lambda_recon * recon_loss + 
                   args.lambda_p * p_loss + 
                   args.lambda_color * color_loss + 
@@ -103,7 +103,6 @@ def visualize_reconstructions(model, loader, device, step, output_dir):
         images, _ = next(iter(loader))
         images = images.to(device)
         
-        # 修复：模型现在返回6个值，更新解包以匹配
         _, reconstructions, _, _, _, _ = model(images)
 
     # Denormalize for visualization
@@ -124,12 +123,11 @@ def visualize_reconstructions(model, loader, device, step, output_dir):
 
 def plot_cumulative_losses(history, output_dir, smoothing_window=100, legend_window=1000):
     """
-    绘制从开始到现在的累计损失曲线，并更新图例中的最新平均值。
-    使用移动平均对曲线进行平滑处理。
+    Plot the cumulative loss curve from the start to the present, and update the latest average value in the legend.
+Smoothe the curve using a moving average.
     """
     plt.figure(figsize=(18, 10))
     
-    # 定义要绘制的损失项和对应的颜色/标签
     loss_items = {
         'total': ('r', 'Total Loss'),
         'recon': ('b', 'Recon Loss'),
@@ -147,18 +145,18 @@ def plot_cumulative_losses(history, output_dir, smoothing_window=100, legend_win
         if key in history and history[key]:
             data = np.array(history[key])
             
-            # 使用移动平均平滑数据
+            # EMA
             if len(data) >= smoothing_window:
-                # 计算移动平均值
+                # computing EMA
                 smoothed_data = np.convolve(data, np.ones(smoothing_window)/smoothing_window, mode='valid')
-                # x轴也需要相应调整，使其与平滑后的数据对齐
+                
                 x_steps = np.arange(smoothing_window - 1, len(data))
                 plt.plot(x_steps, smoothed_data, color=color, linestyle='-', alpha=0.9, linewidth=1.5, label=label)
             else:
-                # 如果数据点不够，直接绘制原始数据
+                
                 plt.plot(data, color=color, linestyle='-', alpha=0.7, linewidth=1.5, label=label)
 
-            # 为图例计算最近N个批次的平均值
+            
             if len(data) >= legend_window:
                 avg_val = np.mean(data[-legend_window:])
                 legend_text = f'{label} (last {legend_window} avg: {avg_val:.4f})'
@@ -201,32 +199,32 @@ def analyze_embeddings(model, x, step, output_dir):
 
 def plot_latent_space_distribution(model, z_e_hyp_batch, step, output_dir, n_samples=2048):
     """
-    通过PCA降维来可视化编码器输出z_e_hyp的分布。
-    生成两个子图：
-    1. 3D散点图，按双曲半径着色。
-    2. 极坐标图，显示半径和角度的分布。
+    Visualize the distribution of the encoder output z_e_hyp using PCA dimensionality reduction.
+    Generates two subplots:
+    1. 3D scatter plot, colored by hyperbolic radius.
+    2. Polar plot showing the distribution of radius and angle.
     """
     if z_e_hyp_batch is None:
         return
 
-    # --- 数据准备 ---
+    # --- data preparation ---
     model.eval()
     with torch.no_grad():
-        # 将 [B, C+1, H, W] -> [B*H*W, C+1]
+        #  [B, C+1, H, W] -> [B*H*W, C+1]
         z_flat = z_e_hyp_batch.permute(0, 2, 3, 1).reshape(-1, z_e_hyp_batch.shape[1])
         
-        # 如果向量太多，进行随机下采样
+        # if there are too many vectors, then downsampling
         if z_flat.shape[0] > n_samples:
             indices = torch.randperm(z_flat.shape[0], device=z_flat.device)[:n_samples]
             z_sample = z_flat[indices]
         else:
             z_sample = z_flat
         
-        # 提取空间部分和计算双曲半径
+        # Extracting spatial components and calculating hyperbolic radius
         spatial_vectors = z_sample[:, 1:]
         radii = model.manifold.dist0(z_sample).cpu().numpy()
 
-    # --- PCA降维 ---
+    # --- PCA dimensionality reduction ---
     # 3D PCA
     pca_3d = PCA(n_components=3)
     z_3d = pca_3d.fit_transform(spatial_vectors.cpu().numpy())
@@ -235,14 +233,14 @@ def plot_latent_space_distribution(model, z_e_hyp_batch, step, output_dir, n_sam
     pca_2d = PCA(n_components=2)
     z_2d = pca_2d.fit_transform(spatial_vectors.cpu().numpy())
     
-    # 从2D PCA结果计算角度
+    # Calculating angles from 2D PCA results
     angles = np.arctan2(z_2d[:, 1], z_2d[:, 0])
     
-    # --- 绘图 ---
+    # --- Drawing ---
     fig = plt.figure(figsize=(24, 10))
     fig.suptitle(f'Latent Space Distribution at Step {step}', fontsize=16)
 
-    # 1. 3D散点图
+    # 1. 3D scatter 
     ax1 = fig.add_subplot(121, projection='3d')
     scatter1 = ax1.scatter(z_3d[:, 0], z_3d[:, 1], z_3d[:, 2], c=radii, cmap='viridis', s=10, alpha=0.7)
     ax1.set_title('3D PCA of Spatial Latent Vectors (Colored by Hyperbolic Radius)')
@@ -252,14 +250,14 @@ def plot_latent_space_distribution(model, z_e_hyp_batch, step, output_dir, n_sam
     fig.colorbar(scatter1, ax=ax1, label='Hyperbolic Radius')
     ax1.grid(True)
 
-    # 2. 极坐标图
+    # 2. ploration
     ax2 = fig.add_subplot(122, polar=True)
     scatter2 = ax2.scatter(angles, radii, c=radii, cmap='viridis', s=10, alpha=0.7)
     ax2.set_title('Polar Distribution (Radius vs. Angle from 2D PCA)')
-    ax2.set_rlabel_position(-30)  # 移动径向标签以避免重叠
+    ax2.set_rlabel_position(-30)  # Move radial labels to avoid overlapping
     ax2.grid(True)
     
-    # --- 保存图像 ---
+    # --- save images  ---
     save_dir = os.path.join(output_dir, "latent_space_dist")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f'latent_dist_step_{step}.png')
@@ -271,32 +269,32 @@ def plot_latent_space_distribution(model, z_e_hyp_batch, step, output_dir, n_sam
 
 def plot_angular_distribution_at_radius(model, z_e_hyp_batch, step, output_dir, n_samples=1024, radius_window=0.1):
     """
-    可视化在特定半径壳层内，潜在向量在空间角度上的分布。
-    1. 找到最常见的半径。
-    2. 筛选出该半径附近的一个壳层内的所有向量。
-    3. 使用PCA将这些向量降到3D并绘制散点图。
+    Visualize the distribution of potential vectors across spatial angles within a specific radius shell.
+    1. Find the most common radius.
+    2. Filter all vectors within a shell around that radius.
+    3. Use PCA to reduce these vectors to 3D and plot them.
     """
     if z_e_hyp_batch is None:
         return
 
-    # --- 数据准备 ---
+    # --- data preparation ---
     model.eval()
     with torch.no_grad():
         z_flat = z_e_hyp_batch.permute(0, 2, 3, 1).reshape(-1, z_e_hyp_batch.shape[1])
         
-        # 计算所有向量的半径
+        # Calculate the radius of all vectors
         all_radii = model.manifold.dist0(z_flat)
         
-        # 如果没有有效的半径，则退出
+        # If no radius is valid, exit
         if all_radii.numel() == 0:
             print(f"[警告] 步骤 {step}: 无法计算半径用于角度分布图。")
             model.train()
             return
             
-        # 确定目标半径 (使用均值)
+        #Determine target radius (using mean)
         target_radius = all_radii.mean().item()
         
-        # 筛选出在半径壳层内的向量
+        # Filter out vectors within the radius shell
         mask = (all_radii >= target_radius - radius_window) & (all_radii <= target_radius + radius_window)
         
         filtered_vectors = z_flat[mask]
@@ -306,7 +304,7 @@ def plot_angular_distribution_at_radius(model, z_e_hyp_batch, step, output_dir, 
             model.train()
             return
 
-        # 如果向量太多，进行随机下采样
+        # If there are too many vectors, perform random downsampling
         if filtered_vectors.shape[0] > n_samples:
             indices = torch.randperm(filtered_vectors.shape[0], device=filtered_vectors.device)[:n_samples]
             z_sample = filtered_vectors[indices]
@@ -315,11 +313,11 @@ def plot_angular_distribution_at_radius(model, z_e_hyp_batch, step, output_dir, 
         
         spatial_vectors = z_sample[:, 1:]
 
-    # --- PCA降维 ---
+    # --- PCA dimensionality reduction---
     pca_3d = PCA(n_components=3)
     z_3d = pca_3d.fit_transform(spatial_vectors.cpu().numpy())
     
-    # --- 绘图 ---
+    # --- plot ---
     fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
     ax.scatter(z_3d[:, 0], z_3d[:, 1], z_3d[:, 2], s=15, alpha=0.8)
@@ -330,7 +328,7 @@ def plot_angular_distribution_at_radius(model, z_e_hyp_batch, step, output_dir, 
     ax.set_zlabel('Principal Component 3')
     ax.grid(True)
     
-    # --- 保存图像 ---
+    # --- save images ---
     save_dir = os.path.join(output_dir, "angular_dist")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f'angular_dist_step_{step}.png')
@@ -360,35 +358,35 @@ def monitor_gradients(model, step):
         print(f"[步骤 {step}] 警告: 梯度爆炸!")
 
 def monitor_model_weights(model, step):
-    print(f"\n===== 批次{step}权重状态检查 =====")
+    print(f"\n===== Batch {step} weight status check =====")
     problem_found = False
     for name, param in model.named_parameters():
         if torch.isnan(param.data).any():
             problem_found = True
-            print(f"警告: 参数 {name} 包含NaN值!")
+            print(f"Warning: Parameter {name} contains NaN value!")
         elif torch.isinf(param.data).any():
             problem_found = True
-            print(f"警告: 参数 {name} 包含Inf值!")
+            print(f"Warning: Parameter {name} contains Inf value!")
         elif param.data.abs().max() > 1e3:
-            print(f"注意: 参数 {name} 包含极大值: {param.data.abs().max().item():.4e}")
+            print(f"Note: Parameter {name} contains an extreme value: {param.data.abs().max().item(): .4e}")
     if not problem_found:
-        print(f"批次{step}: 所有权重正常") 
+        print(f"Batch{step}: all weights normal") 
 
 def plot_codebook_usage(usage, step, output_dir):
     """
-    可视化码本的使用频率。
+    Visualize the frequency of codebook usage.
     """
     if usage is None:
         return
     usage_tensor = usage.detach().cpu()
-    # 防御性编程：检查传入的是否是标量
+    # Defensive programming: Check if the passed in variable is a scalar
     if usage_tensor.dim() == 0:
-        print(f"[警告] 步骤 {step}: plot_codebook_usage 接收到了一个标量，无法绘制码本使用图。请检查模型返回值。")
+        print(f"[Warning] Step {step}: plot_codebook_usage received a scalar, unable to plot codebook usage. Please check the model return value.")
         return
     plt.figure(figsize=(15, 6))
     usage_np = usage_tensor.numpy()
     
-    # 过滤掉使用频率非常低（接近0）的，以获得更清晰的视图
+    # Filter out the ones with very low usage frequency (close to 0) to get a clearer view
     used_indices = np.where(usage_np > 1e-7)[0]
     used_usage = usage_np[used_indices]
     
@@ -401,7 +399,7 @@ def plot_codebook_usage(usage, step, output_dir):
     plt.title(f'Codebook Usage at Step {step}\n{used_codes_count}/{total_codes} codes used ({usage_percentage:.2f}%)')
     plt.xlabel('Used Codebook Index (Sorted by Usage)')
     plt.ylabel('Usage Frequency')
-    plt.yscale('log') # 使用对数刻度可以更好地观察小的使用频率
+    plt.yscale('log') # Use a logarithmic scale to better observe small usage frequencies
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     
     save_path = os.path.join(output_dir, f'codebook_usage_step_{step}.png')
