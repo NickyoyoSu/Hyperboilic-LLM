@@ -3,7 +3,7 @@
 **A comprehensive research codebase for hyperbolic geometry in deep learning and foundation models across multiple modalities.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![arXiv](https://img.shields.io/badge/arXiv-2504.08912-b31b1b.svg)](https://arxiv.org/abs/2504.08912)
+
 
 This repository provides a complete ecosystem for building, training, and deploying foundation models in hyperbolic space. It includes frameworks, training scripts, tokenizers, and tools for working with hyperbolic geometry across text, image, audio, video, and multimodal tasks.
 
