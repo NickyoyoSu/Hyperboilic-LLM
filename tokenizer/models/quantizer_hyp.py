@@ -3,11 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import sys
 import geoopt
-
 sys.path.append('/ext/work')
-
 from hyplib.manifolds.lmath import poincare_to_lorentz, lorentz_to_poincare, dist
 from hyplib.manifolds.lorentzian import Lorentz
+import numpy as np
 
 def from_polar(r, w):
     """
@@ -62,8 +61,8 @@ def check_on_manifold(x_hyp, name, manifold, step, tolerance=1e-5):
 
 
 class VectorQuantizer(nn.Module):
-    def __init__(self, n_e, e_dim, beta, radial_bins=16, max_radius=18.0, 
-                use_ema=False, ema_decay=0.99, c=1.0):
+    def __init__(self, n_e, e_dim, beta, radial_bins=16, max_radius=1.1, 
+                use_ema=False, ema_decay=0.99, c=1.0, initial_temp=5.0):
         super().__init__()
         assert n_e % radial_bins == 0, "n_e 必须被 radial_bins 整除"
         self.n_e          = n_e
@@ -73,20 +72,49 @@ class VectorQuantizer(nn.Module):
         self.angular_bins = n_e // radial_bins
         self.max_radius   = max_radius
         self.manifold     = Lorentz(c=c)
+        self.initial_temp = initial_temp
+        self.current_temp = initial_temp  
+        self.register_buffer('temp', torch.tensor(initial_temp)) 
         
         # 添加EMA支持
         self.use_ema = use_ema
         self.ema_decay = ema_decay
 
         # 径向中心（超曲半径 r）
-        log_r = torch.linspace(0., torch.log(torch.tensor(max_radius)), radial_bins)
-        self.r_centres = nn.Parameter(torch.exp(log_r))  # (radial_bins,)
+        if radial_bins > 0:
+            # 设置新的径向中心分布以匹配编码器输出范围
+    # 设置与编码器扩展范围匹配的径向分布
+            r_min = 0.15
+            r_max = 1.2 # 略大于编码器最大半径(0.6074)
+            # 方法1：使用对数空间划分（推荐）
+            r_values = torch.linspace(r_min, r_max, radial_bins).tolist()
+            
+            # 方法2：也可以使用分段线性分布
+            # r_values = []
+            # r_values.extend(torch.linspace(r_min, 1.0, radial_bins//4).tolist())  # 25%的bins用于[0.33-1.0]
+            # r_values.extend(torch.linspace(1.0, 3.0, radial_bins//4).tolist())    # 25%的bins用于[1.0-3.0]
+            # r_values.extend(torch.linspace(3.0, 7.0, radial_bins//4).tolist())    # 25%的bins用于[3.0-7.0]
+            # r_values.extend(torch.linspace(7.0, r_max, radial_bins-len(r_values)).tolist()) # 剩余bins用于[7.0-10.0]
+            
+            self.r_centres = nn.Parameter(torch.tensor(r_values))
 
         # 角度中心：R^e_dim 上的单位向量
         self.angular_codebook = nn.Embedding(self.angular_bins, self.e_dim- 1)
+        # 确保初始化时角度向量分布在不同的半径上
         with torch.no_grad():
-            v = torch.randn(self.angular_bins, self.e_dim-1)
-            self.angular_codebook.weight.copy_(F.normalize(v, dim=-1))
+            # 重新初始化径向中心，确保更均匀的分布
+            r_span = r_max - r_min
+            for i, r in enumerate(self.r_centres):
+                # 轻微扰动半径，避免完全均匀分布
+                noise = torch.randn(1).item() * 0.05 * r_span
+                self.r_centres.data[i] = r_min + (i / (self.radial_bins-1)) * r_span + noise
+                self.r_centres.data[i] = torch.clamp(self.r_centres.data[i], min=r_min, max=r_max)
+            
+            # --- 修复：正确初始化角度码本 ---
+            # 角度码本与径向分量无关，只需初始化一次。
+            # 之前复杂的循环逻辑是错误的，因为它试图访问码本不存在的索引。
+            v = torch.randn(self.angular_bins, self.e_dim - 1)
+            self.angular_codebook.weight.data.copy_(F.normalize(v, dim=-1))
             
         # 为EMA更新添加缓冲区
         if self.use_ema:
@@ -101,7 +129,24 @@ class VectorQuantizer(nn.Module):
             # EMA状态跟踪
             self.register_buffer('ema_initialized', torch.tensor(0))
 
-    def forward(self, u_hyp,debug_step=None):
+        # 添加到VectorQuantizer类
+    def temp_adjusted_dist(self, x, y, temp=None):
+        """温度调节的双曲距离计算"""
+        temp = temp if temp is not None else self.temp
+        
+        # 基本双曲距离
+        hyp_dist = self.manifold.dist(x, y)
+        
+        # 计算半径差异惩罚
+        r_x = torch.acosh(torch.clamp(x[:, 0], min=1.0+1e-5))
+        r_y = torch.acosh(torch.clamp(y[:, 0], min=1.0+1e-5))
+        radius_diff = torch.abs(r_x - r_y)
+        
+        # 添加半径差异惩罚项 - 从2.0增加到5.0
+        radius_weight = 1  # 显著增加半径差异的重要性
+        return hyp_dist + radius_weight * radius_diff
+
+    def forward(self, u_hyp, debug_step=None, features_for_clustering=None):
         """
         直接接受双曲输入的向量量化
         输入: u_hyp [B, C+1, H, W] - Lorentz模型上的点（包含时间分量）
@@ -113,75 +158,107 @@ class VectorQuantizer(nn.Module):
         u_hyp_flat = u_hyp.reshape(-1, u_hyp_shape[-1])
 
         # --- 分解 ---
-        # 计算双曲半径 (arccosh(t))
         u_time = u_hyp_flat[:, 0:1]
         u_space = u_hyp_flat[:, 1:]
-        r = torch.acosh(u_time.clamp(min=1.0 + 1e-7))
+        r = torch.acosh(u_time.clamp(min=1.0 + 1e-2))
         w = F.normalize(u_space, dim=1)
-
-        # --- 量化 ---
-        # 径向量化
+        
+        # --- 改进的量化过程 --- TODO 直接投到lorentz空间？
         r_centres = torch.clamp(self.r_centres, min=1e-2, max=self.max_radius)
-        dist_r2 = (r - r_centres)**2
-        r_idx = dist_r2.argmin(dim=-1)
-        r_hard = r_centres[r_idx]
-
-        # 角度量化
+        
+        # 1. 预筛选最可能的候选项
+        top_k_r = min(3, self.radial_bins)   # 选择最近的几个半径
+        top_k_w = min(5, self.angular_bins)  # 选择最相似的几个方向
+        
+        # 找到top-k最近的径向值
+        dist_r = torch.abs(r - r_centres)  # 使用绝对差异而非平方差异
+        _, top_r_indices = torch.topk(-dist_r, k=top_k_r, dim=-1)   # 负号使小距离排前面
+        
+        # 找到top-k最相似的角度
         sim = torch.matmul(w, self.angular_codebook.weight.t())
-        w_idx = sim.argmax(dim=-1)
-        w_hard = self.angular_codebook(w_idx)
-
+        _, top_w_indices = torch.topk(sim, k=top_k_w, dim=-1)
+        
+        # 2. 在筛选后的候选项中找到真正最近的 
+        batch_size = u_hyp_flat.size(0)
+        best_dists = torch.full((batch_size,), float('inf'), device=u_hyp_flat.device)
+        best_r_idx = torch.zeros((batch_size,), dtype=torch.long, device=u_hyp_flat.device)
+        best_w_idx = torch.zeros((batch_size,), dtype=torch.long, device=u_hyp_flat.device)
+        
+        # 高效计算：批处理避免循环
+        for i in range(top_k_r):
+            r_idx_batch = top_r_indices[:, i]
+            r_vals = r_centres[r_idx_batch].unsqueeze(-1)  # [batch, 1]
+            
+            for j in range(top_k_w):
+                w_idx_batch = top_w_indices[:, j]
+                w_vals = self.angular_codebook(w_idx_batch)  # [batch, e_dim-1]
+                
+                # 计算这个r,w组合的双曲距离
+                candidate_poinc = from_polar(r_vals, w_vals)
+                candidate_hyp = poincare_to_lorentz(candidate_poinc, k=self.manifold.k)
+                candidate_hyp = self.manifold.projx(candidate_hyp)
+                
+                # 计算与输入的双曲距离
+                curr_dists = self.manifold.dist(u_hyp_flat, candidate_hyp)
+                
+                # 更新最佳匹配
+                update_mask = curr_dists < best_dists
+                best_dists[update_mask] = curr_dists[update_mask]
+                best_r_idx[update_mask] = r_idx_batch[update_mask]
+                best_w_idx[update_mask] = w_idx_batch[update_mask]
+        
+        # 获取最佳匹配的编码
+        r_hard = r_centres[best_r_idx]
+        w_hard = self.angular_codebook(best_w_idx)
+        
         # --- 重建 ---
-        # 从极坐标重建Poincaré点
         x_q_poinc = from_polar(r_hard.unsqueeze(-1), w_hard)
-        # 转换回Lorentz模型
         x_q_hyp_flat = poincare_to_lorentz(x_q_poinc, k=self.manifold.k)
-        # 关键：稳定化并投影回流形
         x_q_hyp_flat = self.manifold.projx(x_q_hyp_flat)
 
         # --- 计算损失 ---
         # VQ 损失: 鼓励编码器输出接近码本向量
         # 使用 detach() 来阻止梯度流向码本
-        loss = self.beta * self.manifold.dist(u_hyp_flat, x_q_hyp_flat.detach()).mean()
+        # 在forward方法中修改损失计算部分
+        # --- 计算损失 ---
+        if not self.use_ema:
+            # 使用温度调节的距离
+            codebook_loss = self.temp_adjusted_dist(u_hyp_flat.detach(), x_q_hyp_flat, self.temp).mean()
+            commitment_loss = self.temp_adjusted_dist(u_hyp_flat, x_q_hyp_flat.detach(), self.temp).mean()
+            loss = codebook_loss + self.beta * commitment_loss
+        else:
+            # 使用EMA时，只需要commitment loss
+            loss = self.beta * self.temp_adjusted_dist(u_hyp_flat, x_q_hyp_flat.detach(), self.temp).mean()
 
-        # --- 直通梯度 ---ß
-        # 将 x_q_hyp_flat 的梯度直接传递给 u_hyp_flat
-        z_q_hyp_flat = u_hyp_flat + (x_q_hyp_flat - u_hyp_flat).detach()
-        # 确保最终输出仍在流形上
-        z_q_hyp = self.manifold.projx(z_q_hyp_flat.view(u_hyp_shape))
+        # --- 直通梯度 ---
+        with torch.no_grad():
+            if self.temp > 1.5:  # 高温状态
+                # 使用简单的线性插值
+                direction = x_q_hyp_flat.detach() - u_hyp_flat
+                z_q_hyp = u_hyp_flat + direction
+            else:
+                # 标准双曲测地线
+                direction = self.manifold.logmap(x_q_hyp_flat.detach(), u_hyp_flat)
+                z_q_hyp = self.manifold.expmap(u_hyp_flat, direction)
+
+        # 确保几何约束
+        z_q_hyp = self.manifold.projx(z_q_hyp.view(u_hyp_shape))
+
 
         # --- 计算困惑度和使用率 ---
-        r_idx_flat = r_idx.flatten()
-        w_idx_flat = w_idx.flatten()
+        r_idx_flat = best_r_idx.flatten()
+        w_idx_flat = best_w_idx.flatten()
         combined_idx = r_idx_flat * self.angular_bins + w_idx_flat
         e_mean = F.one_hot(combined_idx, self.n_e).float().mean(0)
         perplexity = torch.exp(-torch.sum(e_mean * torch.log(e_mean + 1e-10)))
-        codebook_usage = torch.mean((e_mean > 0).float())
+        
+        # 修复：codebook_usage 应该返回 e_mean 向量本身，用于可视化
+        # 而不是返回一个标量
+        codebook_usage = e_mean
 
-        # --- EMA 更新 (如果启用) ---
-        if self.use_ema and self.training:
-            # 更新径向码本
-            r_one_hot = F.one_hot(r_idx_flat, self.radial_bins).float()
-            r_sum = r_one_hot.sum(0)
-            dw_r = r_one_hot.t() @ r.flatten()
-            
-            self.r_cluster_size = self.r_cluster_size * self.ema_decay + (1 - self.ema_decay) * r_sum
-            self.r_centres_ema = self.r_centres_ema * self.ema_decay + (1 - self.ema_decay) * dw_r
-            
-            n_r = self.r_cluster_size.sum()
-            r_centres_normalized = self.r_centres_ema / (self.r_cluster_size + 1e-5)
-            self.r_centres.data.copy_(r_centres_normalized)
-
-            # 更新角度码本
-            w_one_hot = F.one_hot(w_idx_flat, self.angular_bins).float()
-            w_sum = w_one_hot.sum(0)
-            dw_w = w_one_hot.t() @ w
-            
-            self.angular_cluster_size = self.angular_cluster_size * self.ema_decay + (1 - self.ema_decay) * w_sum
-            self.angular_ema = self.angular_ema * self.ema_decay + (1 - self.ema_decay) * dw_w
-            
-            n_w = self.angular_cluster_size.sum()
-            angular_normalized = self.angular_ema / (self.angular_cluster_size.unsqueeze(1) + 1e-5)
-            self.angular_codebook.weight.data.copy_(F.normalize(angular_normalized, dim=-1))
-
-        return loss, z_q_hyp, perplexity, None, None, codebook_usage, e_mean
+        # --- 新增：码本多样性损失 ---
+        # 目标是最大化e_mean的熵，等同于最小化负熵
+        diversity_loss = -torch.sum(e_mean * torch.log(e_mean + 1e-10))
+        
+        # 清理返回接口，移除多余的None
+        return loss, z_q_hyp, perplexity, diversity_loss, codebook_usage
