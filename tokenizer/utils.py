@@ -8,23 +8,23 @@ from datasets.block import BlockDataset, LatentBlockDataset
 import numpy as np
 
 def calculate_imagenet_var(dataloader, num_batches=50):
-    """使用批处理计算数据集方差"""
-    print("计算数据集方差...")
+    """Calculate the variance of a dataset using batch processing"""
+    print("Calculate the variance of a dataset...")
     running_var = 0.0
     count = 0
     
     for i, (batch, _) in enumerate(dataloader):
-        if i >= num_batches:  # 只使用部分批次计算方差
+        if i >= num_batches:  # Only use part of the batch to calculate the variance
             break
-        # 计算当前批次的方差
+        # Calculate the variance of the current batch
         batch_var = torch.var(batch).item()
         running_var += batch_var
         count += 1
         if i % 10 == 0:
-            print(f"已处理 {i}/{num_batches} 批次")
+            print(f"Processed {i}/{num_batches} batches")
     
     final_var = running_var / count if count > 0 else 0
-    print(f"方差计算完成: {final_var:.6f}")
+    print(f"Variance calculation completed: {final_var:.6f}")
     return final_var
 
 def load_cifar():
@@ -60,34 +60,33 @@ import os
 
 
 def load_imagenet(data_dir="/ext/work/ILSVRC2012_img_val"):
-    print(f"尝试加载数据集，路径: {data_dir}")
+    print(f"Try to load the dataset, path: {data_dir}")
     
-    # 检查目录是否存在
+    # Check if directory exists
     if not os.path.exists(data_dir):
-        raise FileNotFoundError(f"数据集根目录不存在: {data_dir}")
+        raise FileNotFoundError(f"The dataset root directory does not exist: {data_dir}")
     
     #train_dir = os.path.join(data_dir, "train")
     train_dir = "/ext/imagenet/train"
     #val_dir = os.path.join(data_dir, "val")
     val_dir = "/ext/imagenet/val"
     
-    # 检查训练和验证集目录
+    # Check the training and validation set directories
     if not os.path.exists(train_dir):
-        raise FileNotFoundError(f"训练集目录不存在: {train_dir}")
+        raise FileNotFoundError(f"The training set directory does not exist: {train_dir}")
     if not os.path.exists(val_dir):
-        raise FileNotFoundError(f"验证集目录不存在: {val_dir}")
+        raise FileNotFoundError(f"The validation set directory does not exist: {val_dir}")
     
-    # 检查目录内容
     train_classes = os.listdir(train_dir)
-    print(f"训练集目录包含以下内容: {train_classes}")    
-    # 检查第一个类别文件夹中的文件
+    print(f"The training set directory contains the following: {train_classes}")    
+    # Check the files in the first category folder
     if train_classes:
         first_class = train_classes[0]
         first_class_path = os.path.join(train_dir, first_class)
         if os.path.isdir(first_class_path):
             files = os.listdir(first_class_path)
-            print(f"第一个类别 {first_class} 包含的文件: {files[:5]} ...")
-            print(f"总计文件数: {len(files)}")
+            print(f"The first class {first_class} contains the files: {files[:5]} ...")
+            print(f"Total number of files: {len(files)}")
     
     transform = transforms.Compose([
         transforms.Resize(128),  
@@ -98,16 +97,16 @@ def load_imagenet(data_dir="/ext/work/ILSVRC2012_img_val"):
     
     try:
         train = datasets.ImageFolder(root=train_dir, transform=transform)
-        print(f"成功加载训练集，包含 {len(train)} 张图片")
+        print(f"Successfully loaded the training set, containing {len(train)} images")
     except Exception as e:
-        print(f"加载训练集失败: {str(e)}")
+        print(f"Failed to load training set: {str(e)}")
         raise
         
     try:
         val = datasets.ImageFolder(root=val_dir, transform=transform)
-        print(f"成功加载验证集，包含 {len(val)} 张图片")
+        print(f"Successfully loaded the validation set, containing {len(val)} images")
     except Exception as e:
-        print(f"加载验证集失败: {str(e)}")
+        print(f"Failed to load validation set: {str(e)}")
         raise
     
     return train, val
