@@ -21,14 +21,12 @@ class DecoderLorentz(nn.Module):
         # 固定通道比例序列，与编码器匹配
         ch_mult = (4, 2, 1)
         self.num_resolutions = len(ch_mult)
-        
-        # 注意：输入通道数应该等于 h_dim_tan * ch_mult[0]
         curr_channels = self.in_channels - 1  # 减去时间分量
         
         # 中间块
         self.mid_block = LorentzResidualBlock(
             manifold_in=self.manifold,
-            in_channels=curr_channels ,  # 包含时间分量
+            in_channels=curr_channels ,  # 仅空间分量
             out_channels=curr_channels  # 仅空间分量
         )
 
@@ -38,7 +36,7 @@ class DecoderLorentz(nn.Module):
         #print(f"mid_block.in_channels: {curr_channels + 1}")
         #print(f"mid_block.out_channels: {curr_channels}")
         #print(f"ch_mult: {ch_mult}")
-        
+        #===上采样路径构建===
         # 上采样路径
         self.up_path = nn.ModuleList()
         
@@ -48,7 +46,9 @@ class DecoderLorentz(nn.Module):
             out_channels = h_dim_tan * ch_mult[min(i_level + 1, self.num_resolutions - 1)]
             
             #print(f"第{i_level}层上采样块: in_channels={curr_channels}, out_channels={out_channels}")
-            
+
+
+        #===残差块添加===
             # 残差块
             for i_block in range(n_res_layers):
                 level_modules.append(
@@ -60,7 +60,7 @@ class DecoderLorentz(nn.Module):
                 )
                 #print(f"  第{i_level}层第{i_block}个残差块: in={curr_channels}, out={out_channels}")
                 curr_channels = out_channels
-                
+        #===上采样层添加===
             # 上采样
             if i_level != self.num_resolutions - 1:
                 # 使用双曲上采样
@@ -70,7 +70,7 @@ class DecoderLorentz(nn.Module):
             self.up_path.append(level_modules)
         
         # 双曲到欧几里得的映射
-        # 1. 最后的双曲处理
+        #=== 定义从双曲到欧几里得空间的转换，并生成最终RGB图像输出。===
         self.final_hyp_conv = LorentzConv2d(
             manifold_in=self.manifold,
             in_channels=curr_channels+1,
@@ -79,10 +79,9 @@ class DecoderLorentz(nn.Module):
             padding=1
         )
         #print(f"最终双曲卷积: in={curr_channels}, out={h_dim_tan//2}")
-        
-        # 2. 从双曲映射到欧几里得空间
+        # 2. 从双曲映射到几里得空间
         self.final_euc_conv = nn.Conv2d(h_dim_tan//2, out_channels_euc, kernel_size=3, padding=1)
-        self.final_act = nn.Sigmoid()  # 用于图像输出的激活函数
+        self.final_act = nn.Tanh()  # 修改：使用Tanh以输出[-1, 1]范围
         #print(f"最终欧几里得卷积: in={h_dim_tan//2}, out={out_channels_euc}")
         
     def _make_upsample_block(self, in_channels, out_channels):
@@ -90,11 +89,6 @@ class DecoderLorentz(nn.Module):
         def get_Activation(manifold_in, activation=F.relu, manifold_out=None):
             return LorentzActivation(manifold_in, activation, manifold_out)
         """
-        几何一致的上采样块
-        
-        参数:
-            in_channels: 输入的空间通道数（不包含时间分量）
-            out_channels: 输出的空间通道数（不包含时间分量）
         """
         #print(f"\n===== 构建上采样块 =====")
         #print(f"传入参数: in_channels={in_channels} (空间通道), out_channels={out_channels} (空间通道)")
@@ -112,7 +106,7 @@ class DecoderLorentz(nn.Module):
             ),
             LorentzBatchNorm2d(
                 manifold_in=self.manifold,
-                num_channels=out_channels +1, #？？？？#TODO
+                num_channels=out_channels +1, #
                 space_method=True
             ),
             get_Activation(self.manifold, F.silu)
@@ -138,7 +132,8 @@ class DecoderLorentz(nn.Module):
         for i_level, level_modules in enumerate(self.up_path):
             for layer in level_modules:
                 h = layer(h)
-        
+                h = self.manifold.projx(h)
+
         # STAGE 3: 最终双曲卷积
         h = self.final_hyp_conv(h)
         
@@ -151,13 +146,3 @@ class DecoderLorentz(nn.Module):
         x_hat = self.final_act(x_hat)
         
         return x_hat
-    
-    def _check_on_manifold(self, x, tolerance=1e-5):
-        """健壮的流形约束检查"""
-        try:
-            check_result = self.manifold.check_point_on_manifold(x, rtol=tolerance, atol=tolerance)
-            if isinstance(check_result, bool):
-                return check_result
-            return check_result.all()
-        except:
-            return False
