@@ -9,14 +9,14 @@ This repository provides a complete ecosystem for building, training, and deploy
 
 ##  Key Features
 
-- **🔧 HyperCore Framework**: Comprehensive PyTorch-based framework for hyperbolic neural networks
-- **🤖 HypFormer Architecture**: Hyperbolic Transformer backbone for multimodal learning
-- **🎯 Multi-Modal Support**: Text, image, audio, video, and cross-modal applications
-- **📊 Hyperbolic Tokenizers**: VQ-VAE and autoencoder implementations in hyperbolic space
-- **🔗 Model Integration**: Support for popular models (Llama, Stable Diffusion, CLIP, etc.)
-- **⚡ Efficient Training**: LoRA fine-tuning, multi-GPU support, and optimized implementations
+- **HyperCore Framework**: Comprehensive PyTorch-based framework for hyperbolic neural networks
+- **HypFormer Architecture**: Hyperbolic Transformer backbone for multimodal learning
+- **Multi-Modal Support**: Text, image, audio, video, and cross-modal applications
+- **Hyperbolic Tokenizers**: VQ-VAE and autoencoder implementations in hyperbolic space
+- **Model Integration**: Support for popular models (Llama, Stable Diffusion, CLIP, etc.)
+- **Efficient Training**: LoRA fine-tuning, multi-GPU support, and optimized implementations
 
-## 🏗️ Repository Structure
+## Repository Structure
 
 ```
 ├── HyperCore/           # Core hyperbolic deep learning framework
@@ -34,7 +34,7 @@ This repository provides a complete ecosystem for building, training, and deploy
 | **[hyperbolic_mapping](hyperbolic_mapping/)** | Mapping heads for existing models | Text/image alignment, LoRA fine-tuning, multi-GPU |
 | **[tokenizer](tokenizer/)** | Hyperbolic tokenization and compression | VQ-VAE, autoencoders, Lorentz manifold operations |
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -90,37 +90,37 @@ class HyperbolicTransformer(torch.nn.Module):
         self.mlp = hnn.LorentzLinear(manifold, d_model, d_model*4-1)
 ```
 
-#### 🖼️ Image Classification (CIFAR-10)
+#### Image Classification (CIFAR-10)
 ```bash
 cd hyperbolic_fully
 python image_fully_minor.py --dataset cifar10 --image_size 64 --batch_size 32 --epochs 10
 ```
 
-#### 📝 Text Modeling (WikiText-2)
+#### Text Modeling (WikiText-2)
 ```bash
 cd hyperbolic_fully  
 python text_fully.py --epochs 20 --batch_size 64 --lr 5e-3
 ```
 
-#### 🎵 Audio Processing
+#### Audio Processing
 ```bash
 cd hyperbolic_fully
 python sound_fully.py --audio_subset "train[:1%]" --batch_size 8 --epochs 5
 ```
 
-#### 🎬 Video Understanding (UCF101)
+#### Video Understanding (UCF101)
 ```bash
 cd hyperbolic_fully
 python vedio_fully.py --data_dir ./ucf101_frames --num_frames 8 --batch_size 4 --epochs 10
 ```
 
-#### 🔗 Multimodal Learning
+#### Multimodal Learning
 ```bash
 cd hyperbolic_mapping
 python multimodal_mapping.py --use_hyperbolic --use_lora --num_epochs 5 --batch_size 2
 ```
 
-#### 🏷️ Hyperbolic Tokenizer Training
+#### Hyperbolic Tokenizer Training
 ```bash
 cd tokenizer
 # Pretrain autoencoder
@@ -130,7 +130,7 @@ python train_autoencoder.py --dataset CIFAR10 --epochs 50
 python main_hyp.py --dataset CIFAR10 --n_embeddings 1024 --n_updates 10000
 ```
 
-## 📚 Detailed Documentation
+## Detailed Documentation
 
 Each component has comprehensive documentation:
 
@@ -139,7 +139,7 @@ Each component has comprehensive documentation:
 - **[Hyperbolic Mapping](hyperbolic_mapping/README.md)**: Language and multimodal mapping with existing models
 - **[Tokenizer](tokenizer/README.md)**: Hyperbolic VQ-VAE and tokenization systems
 
-## 🧪 Research Applications
+## Research Applications
 
 This repository enables research in:
 
@@ -149,7 +149,7 @@ This repository enables research in:
 - **Efficient Training**: Parameter-efficient fine-tuning with hyperbolic mappings
 - **Tokenization**: Novel compression schemes using hyperbolic embeddings
 
-## 🎯 Supported Models & Integrations
+## Supported Models & Integrations
 
 - **Language Models**: Llama 3.2 (1B, 11B), GPT-style architectures
 - **Vision Models**: ViT, ResNet variants, multimodal transformers
@@ -157,7 +157,7 @@ This repository enables research in:
 - **Audio**: Whisper tokenizer integration
 - **Datasets**: CIFAR-10, ImageNet, WikiText, COCO, Common Voice, UCF101
 
-## 📊 Hyperbolic Geometry Benefits
+## Hyperbolic Geometry Benefits
 
 Hyperbolic geometry offers unique advantages for deep learning:
 
@@ -166,7 +166,7 @@ Hyperbolic geometry offers unique advantages for deep learning:
 - **Geometric Inductive Bias**: Built-in understanding of hierarchical relationships
 - **Scale Invariance**: Better handling of multi-scale features
 
-## 🛠️ Development & Contribution
+## Development & Contribution
 
 ### Testing Your Installation
 
@@ -186,19 +186,6 @@ python base.py --epochs 1 --batch_size 8  # Quick baseline test
 - **Memory Issues**: Reduce batch size, use gradient checkpointing, or enable mixed precision
 - **Import Errors**: Verify `PYTHONPATH` includes HyperCore directory
 - **Dataset Issues**: Check data paths and ensure sufficient disk space
-
-## 📖 Citation
-
-If you use this repository in your research, please cite:
-
-```bibtex
-@article{hypercore2024,
-  title={HyperCore: A Framework for Hyperbolic Foundation Models},
-  author={},
-  journal={arXiv preprint arXiv:2504.08912},
-  year={2024}
-}
-```
 
 ## 🙏 Acknowledgments
 
@@ -221,6 +208,3 @@ This project is licensed under the MIT License - see the [HyperCore/LICENSE](Hyp
 - [Hyperbolic Attention Networks](https://arxiv.org/abs/2005.00749)
 - [Poincaré Embeddings](https://proceedings.neurips.cc/paper/2017/hash/59dfa2df42d9e3d41f5b02bfc32229-Abstract.html)
 
----
-
-**🚀 Start exploring hyperbolic foundation models today!** Choose your modality and dive into the corresponding component directory.
