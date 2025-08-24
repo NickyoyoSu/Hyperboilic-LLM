@@ -25,7 +25,7 @@ This repository provides a (in progress) ecosystem for building, training, and d
 └── tokenizer/          # Hyperbolic VQ-VAE and tokenizers
 ```
 
-### 📁 Component Overview
+###  Component Overview
 
 | Component | Description | Key Features |
 |-----------|-------------|--------------|
