@@ -133,6 +133,10 @@ python final_test.py \
 - `HyperLib` (Lorentz geometry components)
 
 ### Current progress
+For text_mapping.py I find after severel eooches hyperbolic version is slitly better than euclidean one
 ![image](https://github.com/NickyoyoSu/Hyperboilic-LLM/blob/main/hyperbolic_mapping/images/loss.pic.jpg)
 ![image](https://github.com/NickyoyoSu/Hyperboilic-LLM/blob/main/hyperbolic_mapping/images/perplexity.pic.jpg)
+For image mapping, for some reason the experiment didn't finished.
+
+Downstrean tasks should be finished in the future.
 
