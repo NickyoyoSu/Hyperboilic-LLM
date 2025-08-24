@@ -134,3 +134,5 @@ python final_test.py \
 
 ### Current progress
 ![image](https://github.com/NickyoyoSu/Hyperboilic-LLM/blob/main/hyperbolic_mapping/images/loss.pic.jpg)
+![image](https://github.com/NickyoyoSu/Hyperboilic-LLM/blob/main/hyperbolic_mapping/images/perplexity.pic.jpg)
+
