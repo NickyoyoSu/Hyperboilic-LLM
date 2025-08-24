@@ -131,3 +131,6 @@ python final_test.py \
 - Stability AI Stable Diffusion
 - MS COCO Dataset
 - `HyperLib` (Lorentz geometry components)
+
+### Current progress
+
