@@ -118,6 +118,6 @@ Note: the script loads sizable vision-language and text-to-image models; ensure 
 - If remote downloads are slow, pre-download assets and point the paths to local files.
 - Logs typically report cross-entropy and perplexity (PPL). Multimodal examples include simple generation demos.
 
-## Acknowledgements
+## Summary
 
-- This project builds on PyTorch and the Hugging Face ecosystem (datasets/transformers/diffusers), and draws inspiration from community hyperbolic geometry implementations.
+- This project is an unfinished one, a prototype only. We plan to wait until the Hyperbolic Tokenizer is complete before moving forward. Alternatively, we can conduct small-scale experiments using the Euclid Tokenizer.
