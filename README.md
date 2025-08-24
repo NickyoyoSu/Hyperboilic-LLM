@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 
-This repository provides a complete ecosystem for building, training, and deploying foundation models in hyperbolic space. It includes frameworks, training scripts, tokenizers, and tools for working with hyperbolic geometry across text, image, audio, video, and multimodal tasks.
+This repository provides a (in progress) ecosystem for building, training, and deploying foundation models in hyperbolic space. It includes frameworks, training scripts, tokenizers, and tools for working with hyperbolic geometry across text, image, audio, video, and multimodal tasks.
 
 ##  Key Features
 
@@ -187,7 +187,7 @@ python base.py --epochs 1 --batch_size 8  # Quick baseline test
 - **Import Errors**: Verify `PYTHONPATH` includes HyperCore directory
 - **Dataset Issues**: Check data paths and ensure sufficient disk space
 
-## 🙏 Acknowledgments
+##  Acknowledgments
 
 This project builds upon and integrates with:
 
@@ -197,11 +197,11 @@ This project builds upon and integrates with:
 - **Datasets**: MS COCO, ImageNet, WikiText, Common Voice, UCF101
 - **Research Community**: Contributions from hyperbolic deep learning researchers
 
-## 📄 License
+##  License
 
 This project is licensed under the MIT License - see the [HyperCore/LICENSE](HyperCore/LICENSE) file for details.
 
-## 🔗 Related Work
+##  Related Work
 
 - [Hyperbolic Neural Networks](https://proceedings.neurips.cc/paper/2018/hash/dbab2adc8f9d078009ee3fa810265-Abstract.html)
 - [Lorentzian Distance Learning](https://arxiv.org/abs/2006.10160) 
