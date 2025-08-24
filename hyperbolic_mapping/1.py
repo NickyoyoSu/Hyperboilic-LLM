@@ -100,8 +100,8 @@ tokenizer = processor.tokenizer
 
 # Model loading and parallel processing
 if args.use_parallel and torch.cuda.device_count() > 1:
-    print(f"use {torch.cuda.device_count()} 个 GPU Conduct training")
-    # Load the model first (not move to device)
+    print(f"Using {torch.cuda.device_count()} GPUs to conduct training")
+    # Load the model first (do not move to device yet)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
         torch_dtype=torch.bfloat16,
@@ -116,7 +116,7 @@ if args.use_parallel and torch.cuda.device_count() > 1:
             lora_alpha=32,
             lora_dropout=0.1,
             bias="none",
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]  # Janus's attention module name
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]  # Janus attention module names
         )
         model = get_peft_model(model, config)
         model.print_trainable_parameters()
@@ -125,13 +125,13 @@ if args.use_parallel and torch.cuda.device_count() > 1:
         for param in model.parameters():
             param.requires_grad = False
     
-    # Then package it into DataParallel
+    # Then wrap with DataParallel
     model = nn.DataParallel(model)
     model = model.to(device)
-    print(f"DataParallel enabled，Using GPU: {list(range(torch.cuda.device_count()))}")
+    print(f"DataParallel enabled, Using GPU: {list(range(torch.cuda.device_count()))}")
 else:
     print(f"Training with a single device: {DEVICE}")
-    # Single GPU mode
+    # Single GPU/CPU mode
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
         torch_dtype=torch.bfloat16,
@@ -155,7 +155,7 @@ else:
         for param in model.parameters():
             param.requires_grad = False
 
-# ============== Customizing the Multimodal Mapping Header =================
+# ============== Customizing the Multimodal Mapping Head =================
 class MultimodalMappingHead(nn.Module):
     def __init__(self, base_model, use_hyperbolic=True, num_layers=2):
         super().__init__()
@@ -196,7 +196,7 @@ class MultimodalMappingHead(nn.Module):
             self.linear3 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
             self.norm3 = nn.LayerNorm(self.hidden_size)
 
-        # Hypercurve Classifier：num_features 为 hidden_size+1（The extra 1 represents the time component）
+        # Hyperbolic classifier: num_features = hidden_size + 1 (the extra 1 represents the time component)
         self.hyp_cls = LorentzMLR(
             self.manifold,
             num_features=self.hidden_size + 1, 
@@ -205,13 +205,13 @@ class MultimodalMappingHead(nn.Module):
         # Euclidean classifier
         self.euc_cls = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
-        print(f"Initialize {'hyperbolic' if use_hyperbolic else 'Euclidean'} mapping header, number of layers: {num_layers}")
+        print(f"Initialize {'hyperbolic' if use_hyperbolic else 'Euclidean'} mapping head, number of layers: {num_layers}")
 
     def lorentz_map(self, x, c_param):
         return expmap0(x, k=c_param, dim=-1)
     
     def forward(self, last_hidden_states, c_param):
-        # Via multimodal adapter
+        # Through the multimodal adapter
         x = self.multimodal_adapter(last_hidden_states)
         
         # First layer processing
@@ -225,15 +225,15 @@ class MultimodalMappingHead(nn.Module):
             x = self.norm2(x)
             x = torch.relu(x)
         
-        # Third-tier processing (if any)
+        # Third layer processing (if any)
         if self.num_layers >= 3:
             x = self.linear3(x)
             x = self.norm3(x)
             x = torch.relu(x)
         
-        # Selecting a classifier based on geometry type
+        # Select classifier based on geometry
         if self.use_hyperbolic:
-            # Add the time component and then perform hypercurve mapping
+            # Add time component then perform hyperbolic mapping
             x = self.manifold.add_time(x)
             hyper_embs = self.lorentz_map(x, c_param)
             logits = self.hyp_cls(hyper_embs)
@@ -267,9 +267,9 @@ try:
         raise FileNotFoundError(f"COCO dataset file not found. Please make sure you have downloaded the dataset to the {data_dir} directory")
     
     # Loading the COCO API
-    print("Load COCO training set annotations...")
+    print("Loading COCO training annotations...")
     train_coco = COCO(train_annotations)
-    print("Load COCO training set annotations...")
+    print("Loading COCO validation annotations...")
     val_coco = COCO(val_annotations)
     
     # Get all image IDs
@@ -306,12 +306,12 @@ try:
             img_info = self.coco.loadImgs(img_id)[0]
             img_path = os.path.join(self.img_dir, img_info['file_name'])
             
-            # Loading an image
+            # Load image
             try:
                 image = Image.open(img_path).convert('RGB')
             except Exception as e:
                 print(f"Unable to load image {img_path}: {e}")
-                # Create a blank image as an alternative
+                # Create a blank image as a fallback
                 image = Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE), color='black')
             
             # Get image description
@@ -355,12 +355,12 @@ try:
             "image_id": image_ids
         }
     
-    # Create a dataset
+    # Create data loaders
     train_dataset = COCODataset(train_coco, train_ids, train_image_dir, max_length=MAX_LENGTH)
     val_dataset = COCODataset(val_coco, new_val_ids, val_image_dir, max_length=MAX_LENGTH)
     test_dataset = COCODataset(val_coco, test_ids, val_image_dir, max_length=MAX_LENGTH)
     
-    # 创建数据加载器
+    # Create data loaders
     train_loader = DataLoader(
         train_dataset, 
         batch_size=BATCH_SIZE, 
@@ -391,41 +391,41 @@ try:
         collate_fn=collate_fn
     )
     
-    print(f"数据加载器创建成功！批次大小: {BATCH_SIZE}")
+    print(f"Data loaders created successfully! Batch size: {BATCH_SIZE}")
     
 except Exception as e:
-    print(f"COCO数据集加载失败: {e}")
+    print(f"Failed to load COCO dataset: {e}")
     traceback.print_exc()
     sys.exit(1)
 
-# ==================== 辅助函数 ====================
+# ==================== Helper Functions ====================
 def prepare_multimodal_inputs_batch(batch, processor):
-    """处理整个批次的图像和文字"""
+    """Process the entire batch of images and text"""
     batch_size = len(batch["image"])
     all_inputs = []
     
-    # 确保临时目录存在
+    # Ensure temp directory exists
     os.makedirs("temp_images", exist_ok=True)
     
     for i in range(batch_size):
         image = batch["image"][i]
         caption = batch["caption"][i]
         
-        # 保存图像到临时文件 - 使用索引确保文件名唯一
+        # Save image to temp file - use index to ensure a unique filename
         temp_img_path = f"temp_images/temp_{time.time()}_{i}.jpg"
         image.save(temp_img_path)
         
-        # 构建会话
+        # Build conversation
         conversation = [
             {
                 "role": "<|User|>",
-                "content": "<image_placeholder>\n描述这张图片",
+                "content": "<image_placeholder>\nDescribe this image",
                 "images": [temp_img_path],
             },
             {"role": "<|Assistant|>", "content": caption},
         ]
         
-        # 处理图像和会话
+        # Process images and conversation
         pil_images = load_pil_images(conversation)
         input_data = processor(
             conversations=conversation,
@@ -433,55 +433,55 @@ def prepare_multimodal_inputs_batch(batch, processor):
             force_batchify=True
         )
         
-        # 将处理后的输入添加到列表
+        # Append processed input to list
         all_inputs.append(input_data)
         
-        # 清理临时文件
+        # Clean up temp file
         if os.path.exists(temp_img_path):
             os.remove(temp_img_path)
     
-    # 批量合并处理后的数据
+    # Batch combine processed inputs
     if len(all_inputs) == 0:
-        raise ValueError("批次中没有有效的输入")
+        raise ValueError("No valid inputs in the batch")
     
-    # 合并所有输入成一个批次
+    # Combine all inputs into one batch
     return batch_combine_inputs(all_inputs)
 
 def batch_combine_inputs(input_list):
-    """合并处理后的输入列表为一个批次，处理不同长度序列"""
+    """Combine processed input list into a single batch, handling variable-length sequences"""
     if len(input_list) == 1:
         return input_list[0]
     
-    # 获取第一个输入的键作为参考
+    # Use the first input's keys as reference
     keys = input_list[0].keys()
     combined = {}
     
     for key in keys:
         if isinstance(input_list[0][key], torch.Tensor):
-            # 处理可能有不同长度的输入
+            # Handle inputs with different lengths
             if input_list[0][key].dim() > 1:
-                # 找出需要处理的张量
+                # Identify tensors to handle
                 tensors = [inp[key] for inp in input_list]
                 shapes = [t.shape for t in tensors]
                 
-                # 检查是否所有形状在第一维之外相同
+                # Check if shapes are identical beyond the first dimension
                 if not all(s[1:] == shapes[0][1:] for s in shapes):
-                    # 需要填充 - 找出每个维度的最大值
+                    # Need padding - find max for each dimension
                     max_dims = []
                     for dim in range(1, len(shapes[0])):
                         max_dims.append(max(s[dim] for s in shapes))
                     
-                    # 创建填充后的张量列表
+                    # Create list of padded tensors
                     padded_tensors = []
                     for tensor in tensors:
-                        # 计算每个维度需要填充的量
+                        # Compute padding needed for each dimension
                         pad_sizes = []
                         for dim in range(1, len(tensor.shape)):
                             pad_sizes.extend([0, max_dims[dim-1] - tensor.shape[dim]])
                         
-                        # 如果需要填充
+                        # If padding is needed
                         if any(p > 0 for p in pad_sizes):
-                            # 从右到左填充（pytorch要求的填充顺序）
+                            # Pad from right to left (PyTorch padding order)
                             padded = torch.nn.functional.pad(tensor, pad_sizes, 'constant', 0)
                             padded_tensors.append(padded)
                         else:
@@ -489,49 +489,49 @@ def batch_combine_inputs(input_list):
                     
                     combined[key] = torch.cat(padded_tensors, dim=0)
                 else:
-                    # 形状相同，直接合并
+                    # Same shape, directly concatenate
                     combined[key] = torch.cat(tensors, dim=0)
             else:
-                # 对于1D张量，直接连接
+                # For 1D tensors, directly concatenate
                 combined[key] = torch.cat([inp[key] for inp in input_list], dim=0)
         elif key in ['pixel_values', 'images_emb_mask', 'images_seq_mask']:
-            # 特殊处理图像相关张量，也需要检查形状
+            # Special handling for image-related tensors; also check shapes
             try:
                 combined[key] = torch.cat([inp[key] for inp in input_list], dim=0)
             except RuntimeError as e:
-                print(f"图像张量形状不一致: {e}，尝试填充...")
-                # 获取张量并检查其形状
+                print(f"Image tensor shape mismatch: {e}, trying to pad...")
+                # Fetch tensors and inspect shapes
                 tensors = [inp[key] for inp in input_list]
                 shapes = [t.shape for t in tensors]
-                print(f"不同样本的形状: {shapes}")
+                print(f"Shapes of different samples: {shapes}")
                 
-                # 简单解决方案 - 如果批量为2，用第一个样本替换批次
+                # Simple fallback - if batch size is 2, use the first sample only
                 if len(input_list) == 2:
-                    print("回退到使用单个样本...")
+                    print("Fallback to using a single sample...")
                     return input_list[0]
                 raise
         else:
-            # 非张量字段，保持列表形式
+            # Non-tensor fields: keep as list
             combined[key] = [inp[key] for inp in input_list]
     
     return combined
 
 def prepare_labels(batch):
-    """准备训练标签"""
+    """Prepare training labels"""
     input_ids = batch["input_ids"].clone()
     
-    # 将标签右移一位，最后位置填充-100（忽略）
+    # Shift labels right by one; set the first position to -100 (ignore)
     labels = torch.roll(input_ids, shifts=1, dims=1)
-    labels[:, 0] = -100  # 忽略第一个位置
+    labels[:, 0] = -100  # Ignore the first position
     
-    # 将填充部分设置为-100
+    # Set padding positions to -100
     padding_mask = (input_ids == tokenizer.pad_token_id)
     labels[padding_mask] = -100
     
     return labels
 
 def compute_lm_loss(logits, labels):
-    """计算语言模型损失"""
+    """Compute language modeling loss"""
     loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
     vocab_size = logits.size(-1)
     logits_2d = logits.view(-1, vocab_size)
@@ -540,9 +540,9 @@ def compute_lm_loss(logits, labels):
     return loss
 
 def get_gpu_memory_stats():
-    """获取GPU内存使用情况"""
+    """Get GPU memory usage"""
     if not torch.cuda.is_available():
-        return "GPU不可用"
+        return "GPU not available"
     
     stats = []
     for i in range(torch.cuda.device_count()):
@@ -552,55 +552,55 @@ def get_gpu_memory_stats():
     
     return " | ".join(stats)
 
-# =========== 初始化模型组件 ===========
+# =========== Initialize model components ===========
 custom_lm_head = MultimodalMappingHead(model, use_hyperbolic=USE_HYPERBOLIC, num_layers=3).to(device)
 learnable_curvature = nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device=device))
 
-# ========= 构建优化器和学习率调度器 ===========
+# ========= Build optimizer and learning rate scheduler ===========
 optimizer = torch.optim.AdamW([
     {"params": list(custom_lm_head.parameters()), "lr": BASE_LR},
     {"params": [learnable_curvature], "lr": CURVATURE_LR}
 ] + ([{"params": [p for p in model.parameters() if p.requires_grad], "lr": BASE_LR}] if USE_LORA else []))
 
-# 计算训练步数
+# Compute training steps
 num_training_steps = len(train_loader) * NUM_EPOCHS
 num_warmup_steps = int(0.1 * num_training_steps)
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
 
 best_loss = float("inf")
 
-# 增强训练指标日志函数
+# Enhanced training metrics logger
 def log_metrics(epoch, avg_loss, ppl, elapsed_time):
-    """记录每个epoch详细训练指标"""
+    """Log detailed training metrics for each epoch"""
     current_lr = optimizer.param_groups[0]['lr']
     gpu_stats = get_gpu_memory_stats() if torch.cuda.is_available() else "N/A"
     
     print(f"\n{'='*50}")
-    print(f"Epoch {epoch} 训练总结 (用时: {elapsed_time:.2f}秒)")
+    print(f"Epoch {epoch} training summary (time: {elapsed_time:.2f}s)")
     print(f"{'='*50}")
-    print(f"训练损失: {avg_loss:.4f}")
-    print(f"困惑度(PPL): {ppl:.2f}")
-    print(f"学习率: {current_lr:.2e}")
-    print(f"超曲曲率: {learnable_curvature.item():.4f}")
-    print(f"GPU内存使用: {gpu_stats}")
-    print(f"每批次平均用时: {elapsed_time/len(train_loader):.3f}秒")
-    print(f"预计下一轮用时: {elapsed_time/60:.1f}分钟")
+    print(f"Training loss: {avg_loss:.4f}")
+    print(f"Perplexity (PPL): {ppl:.2f}")
+    print(f"Learning rate: {current_lr:.2e}")
+    print(f"Hyperbolic curvature: {learnable_curvature.item():.4f}")
+    print(f"GPU memory: {gpu_stats}")
+    print(f"Avg time per batch: {elapsed_time/len(train_loader):.3f}s")
+    print(f"Estimated next epoch time: {elapsed_time/60:.1f} min")
     print(f"{'='*50}")
 
 def save_model(epoch, loss, ppl):
-    """保存模型 - 每个epoch都保存"""
+    """Save model - save at every epoch"""
     global best_loss
     model_type = "hyp" if USE_HYPERBOLIC else "euc"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir = f"./checkpoints/{model_type}"
     os.makedirs(save_dir, exist_ok=True)
     
-    # 记录最佳模型
+    # Track best model
     is_best = loss < best_loss
     if is_best:
         best_loss = loss
     
-    # 始终保存当前epoch的模型
+    # Always save the current epoch model
     filename = f"{model_type}_vision_epoch_{epoch}_loss_{loss:.4f}_PPL_{ppl:.2f}{'_best' if is_best else ''}.pth"
     save_path = os.path.join(save_dir, filename)
     
@@ -621,63 +621,63 @@ def save_model(epoch, loss, ppl):
         else:
             model.save_pretrained(lora_save_path)
         
-    print(f"模型检查点已保存: {save_path}")
+    print(f"Checkpoint saved: {save_path}")
     return save_path
 
 def load_checkpoint(checkpoint_path):
-    """加载检查点恢复训练"""
-    print(f"正在从检查点恢复训练: {checkpoint_path}")
+    """Load checkpoint to resume training"""
+    print(f"Resuming from checkpoint: {checkpoint_path}")
     
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"检查点文件不存在: {checkpoint_path}")
+        raise FileNotFoundError(f"Checkpoint file does not exist: {checkpoint_path}")
     
-    # 加载检查点
+    # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # 恢复模型状态
+    # Restore model state
     custom_lm_head.load_state_dict(checkpoint["lm_head_state"])
     
-    # 恢复曲率参数
+    # Restore curvature parameter
     with torch.no_grad():
         learnable_curvature.copy_(torch.tensor(checkpoint["curvature"], device=device))
     
-    # 恢复优化器状态
+    # Restore optimizer state
     if "optimizer_state" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state"])
-        # 确保优化器张量在正确设备上
+        # Ensure optimizer tensors are on the correct device
         for state in optimizer.state.values():
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
                     state[k] = v.to(device)
     
-    # 恢复调度器状态
+    # Restore scheduler state
     if "scheduler_state" in checkpoint:
         scheduler.load_state_dict(checkpoint["scheduler_state"])
     
-    # 恢复LoRA参数(如果存在)
+    # Restore LoRA weights (if any)
     if USE_LORA and os.path.dirname(checkpoint_path):
         lora_dir = os.path.dirname(checkpoint_path)
-        # 查找最相关的LoRA目录
+        # Find the most relevant LoRA directory
         lora_dirs = [d for d in os.listdir(lora_dir) if d.startswith("lora_")]
         if lora_dirs:
             newest_lora = sorted(lora_dirs)[-1]
             lora_path = os.path.join(lora_dir, newest_lora)
-            print(f"加载LoRA权重: {lora_path}")
+            print(f"Loading LoRA weights: {lora_path}")
             if isinstance(model, nn.DataParallel):
                 model.module.load_adapter(lora_path)
             else:
                 model.load_adapter(lora_path)
     
-    # 返回恢复的训练信息
+    # Return restored training info
     return checkpoint.get("epoch", 0), checkpoint.get("loss", float("inf"))
 
 
-# ====================== 训练模型 ======================
+# ====================== Train the model ======================
 gradient_accumulation_steps = 4
 def train_model():
     global best_loss
     latest_checkpoint_path = None
-    log_interval = 100  # 每100个批次显示一次损失信息
+    log_interval = 100  # Show loss every 100 batches
     
     start_epoch = args.start_epoch
     if args.resume:
@@ -685,67 +685,67 @@ def train_model():
         if loaded_epoch > 0:
             start_epoch = loaded_epoch + 1
             best_loss = min(best_loss, loaded_loss)
-            print(f"成功恢复训练至第{loaded_epoch}轮后，将从第{start_epoch}轮继续")
+            print(f"Successfully resumed to epoch {loaded_epoch}; continuing from epoch {start_epoch}")
     
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
         custom_lm_head.train()
         epoch_start_time = time.time()
         total_loss, count = 0.0, 0
-        recent_losses = []  # 存储最近的损失值
+        recent_losses = []  # Store recent loss values
         
-        # 在循环外清零梯度
+        # Zero grads outside the loop
         optimizer.zero_grad()
         
-        # 每个epoch前清理内存
+        # Clear memory before each epoch
         torch.cuda.empty_cache()
 
-        for i, batch in enumerate(tqdm(train_loader, desc=f"训练第{epoch}轮", 
+        for i, batch in enumerate(tqdm(train_loader, desc=f"Training epoch {epoch}", 
                                       bar_format='{l_bar}{bar:30}{r_bar}')):
 
-        # 处理多模态输入
+            # Process multimodal inputs
             inputs = prepare_multimodal_inputs_batch(batch, processor)
             
-            # 直接将输入移至设备
+            # Move inputs to device directly
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
             labels = prepare_labels(inputs)
             
-# 在train_model和evaluate_model中，修改模型调用部分
+            # In train_model and evaluate_model, modify the internal model call
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 inputs_embeds = model.language_model.get_input_embeddings()(inputs["input_ids"])
                 
-                # 调用内部模型
+                # Call the internal model
                 outputs = model.language_model.model(
                     inputs_embeds=inputs_embeds,
                     attention_mask=inputs["attention_mask"],
                     use_cache=False
                 )
                 
-                # 获取最后的隐藏状态
+                # Get the last hidden state
                 hidden_states = outputs.last_hidden_state
                 
-                # 使用自定义映射头
+                # Use the custom mapping head
                 logits = custom_lm_head(hidden_states, learnable_curvature)
                 loss = compute_lm_loss(logits, labels) / gradient_accumulation_steps
-            # 反向传播
+            # Backpropagation
             loss.backward()
             
-            # 记录每批次损失
+            # Record per-batch loss
             batch_size = len(batch["image"])
             item_loss = loss.item()
             recent_losses.append(item_loss)
             total_loss += item_loss * batch_size
             count += batch_size
             
-            # 每log_interval批次显示一次平均损失
+            # Log average loss every log_interval batches
             if (i + 1) % log_interval == 0:
                 avg_recent_loss = sum(recent_losses[-log_interval:]) / min(log_interval, len(recent_losses))
                 lr = optimizer.param_groups[0]['lr']
-                print(f"批次 {i+1}/{len(train_loader)}, 损失: {avg_recent_loss:.4f}, 学习率: {lr:.1e}, 曲率: {learnable_curvature.item():.4f}")
+                print(f"Batch {i+1}/{len(train_loader)}, loss: {avg_recent_loss:.4f}, LR: {lr:.1e}, curvature: {learnable_curvature.item():.4f}")
             
-            # 累积指定步数后更新参数
+            # Update parameters after the specified accumulation steps
             if (i + 1) % gradient_accumulation_steps == 0 or i == len(train_loader) - 1:
-                # 梯度裁剪
+                # Gradient clipping
                 clip_grad_norm_(
                     [p for p in model.parameters() if p.requires_grad] + 
                     list(custom_lm_head.parameters()) + 
@@ -753,79 +753,79 @@ def train_model():
                     max_norm=1.0
                 )
                 
-                # 更新参数
+                # Update params
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 
-                # 限制曲率范围
+                # Clamp curvature range
                 with torch.no_grad():
                     learnable_curvature.clamp_(1e-3, 1e1)
             
-            # 清理CUDA缓存以减少内存碎片
+            # Empty CUDA cache periodically to reduce fragmentation
             if (i + 1) % (gradient_accumulation_steps * 10) == 0:
                 torch.cuda.empty_cache()
                 
-            # 定期评估
-            #if (i + 1) % args.eval_steps == 0:
-                #print("\n进行中间评估...")
-                #interim_loss = evaluate_model(val_loader, phase="中间验证", max_batches=50)
-                #print(f"中间验证损失: {interim_loss:.4f}")
-                # 恢复训练模式
-                #model.train()
-                #custom_lm_head.train()
+            # Periodic evaluation (disabled)
+            # if (i + 1) % args.eval_steps == 0:
+            #     print("\nIntermediate evaluation...")
+            #     interim_loss = evaluate_model(val_loader, phase="validation", max_batches=50)
+            #     print(f"Interim validation loss: {interim_loss:.4f}")
+            #     # Switch back to training mode
+            #     model.train()
+            #     custom_lm_head.train()
 
-        # 计算并记录每个epoch的详细指标
+        # Compute and log per-epoch metrics
         avg_loss = total_loss / count if count > 0 else 9999.0
         ppl = math.exp(avg_loss) if avg_loss < 20 else float("inf")
         epoch_time = time.time() - epoch_start_time
         
-        # 详细的epoch总结日志
+        # Detailed epoch summary log
         log_metrics(epoch, avg_loss, ppl, epoch_time)
         
-        # 验证
-        print("\n开始完整验证...")
-        val_loss = evaluate_model(val_loader, phase="验证")
+        # Validation
+        print("\nStarting full validation...")
+        val_loss = evaluate_model(val_loader, phase="validation")
         latest_checkpoint_path = save_model(epoch, val_loss, math.exp(val_loss) if val_loss < 20 else float("inf"))
-        # 保存模型        
-        print(f"已保存第{epoch}轮检查点: {latest_checkpoint_path}")
+        # Save model        
+        print(f"Saved checkpoint for epoch {epoch}: {latest_checkpoint_path}")
 
-# ====================== 评估函数 ======================
-def evaluate_model(data_loader, phase="验证", max_batches=None):
+# ====================== Evaluation function ======================
+def evaluate_model(data_loader, phase="validation", max_batches=None):
     model.eval()
     custom_lm_head.eval()
     total_loss, count = 0.0, 0
     start_time = time.time()
     
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(data_loader, desc=f"评估{phase}", 
+        for i, batch in enumerate(tqdm(data_loader, desc=f"Evaluating {phase}", 
                                      bar_format='{l_bar}{bar:30}{r_bar}')):
             if max_batches and i >= max_batches:
                 break
                 
-            # 处理多模态输入
+            # Process multimodal inputs
             inputs = prepare_multimodal_inputs_batch(batch, processor)
             
-            # 将输入移至设备
+            # Move inputs to device
             inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}            
-            # 准备标签
+            # Prepare labels
             labels = prepare_labels(inputs)
             
-            # 前向传播 - 使用autocast确保类型一致性
+            # Forward pass - use autocast to ensure dtype consistency
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 inputs_embeds = model.language_model.get_input_embeddings()(inputs["input_ids"])
                 
-                # 调用内部模型
+                # Call the internal model
                 outputs = model.language_model.model(
                     inputs_embeds=inputs_embeds,
                     attention_mask=inputs["attention_mask"],
                     use_cache=False
                 )
                 
-                # 获取最后的隐藏状态
+                # Get the last hidden state
                 hidden_states = outputs.last_hidden_state
                 
-                # 使用自定义映射头
+                # Use the custom mapping head
                 logits = custom_lm_head(hidden_states, learnable_curvature)
                 loss = compute_lm_loss(logits, labels) / gradient_accumulation_steps
             
@@ -833,30 +833,30 @@ def evaluate_model(data_loader, phase="验证", max_batches=None):
             total_loss += loss.item() * batch_size
             count += batch_size
         
-        # 评估完成后的简洁总结
+        # Concise summary after evaluation
         eval_time = time.time() - start_time
         avg_loss = total_loss / count if count > 0 else float("inf")
         ppl = math.exp(avg_loss) if avg_loss < 20 else float("inf")
         
-        print(f"{phase}结果: 损失={avg_loss:.4f}, PPL={ppl:.2f}, 用时={eval_time:.2f}秒")
+        print(f"{phase} results: loss={avg_loss:.4f}, PPL={ppl:.2f}, time={eval_time:.2f}s")
         return avg_loss
 
 
-# ====================== 主执行流程 ======================
-# ====================== 主执行流程 ======================
+# ====================== Main execution flow ======================
+# ====================== Main execution flow ======================
 if __name__ == "__main__":
     print(f"{'='*50}")
-    print(f"配置: Janus-Pro模型, 超曲={USE_HYPERBOLIC}, LoRA={USE_LORA}, 批量={BATCH_SIZE}")
-    print(f"学习率={BASE_LR}, 曲率学习率={CURVATURE_LR}, 设备={DEVICE}")
+    print(f"Config: Janus-Pro model, hyperbolic={USE_HYPERBOLIC}, LoRA={USE_LORA}, batch={BATCH_SIZE}")
+    print(f"LR={BASE_LR}, curvature LR={CURVATURE_LR}, device={DEVICE}")
     print(f"{'='*50}")
     
-    # 使用args.mode，移除重复的参数解析
+    # Use args.mode; remove duplicated argument parsing
     if args.mode == "train":
-        # 训练模式
-        print("开始训练模型...")
+        # Training mode
+        print("Start training model...")
         train_model()
     
     elif args.mode == "eval":
-        # 评估模式
-        print("开始评估模型...")
-        evaluate_model(test_loader, phase="测试")
+        # Evaluation mode
+        print("Start evaluating model...")
+        evaluate_model(test_loader, phase="test")
