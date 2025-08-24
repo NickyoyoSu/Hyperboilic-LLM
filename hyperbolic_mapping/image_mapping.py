@@ -52,7 +52,7 @@ def get_parser():
 
 args = get_parser().parse_args()
 
-# 设置随机种子以确保可重复性
+# Set random seeds for reproducibility
 torch.manual_seed(args.seed)
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -71,12 +71,12 @@ IMAGE_SIZE = args.image_size
 
 
 
-# ===================== 加载视觉语言模型 =====================
-#hf_token = "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"
+# ===================== Load the vision-language model =====================
+# hf_token = "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"
 
 model_name = "meta-llama/Llama-3.2-11B-Vision"
 from huggingface_hub import HfFolder
-#hf_token = HfFolder.get_token()
+# hf_token = HfFolder.get_token()
 hf_token = "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"
 device = torch.device(DEVICE)
 processor = AutoProcessor.from_pretrained(model_name, token=hf_token)
@@ -88,13 +88,13 @@ model = MllamaForConditionalGeneration.from_pretrained(
 ).to(device)
 
 from inspect import signature
-print("\n检查MLLama模型forward函数的参数:")
+print("\nCheck the parameters of MLLama model's forward function:")
 print(signature(model.forward))
 
-# 定义tokenizer (从processor获取)
+# Define tokenizer (obtain from processor)
 tokenizer = processor.tokenizer
 
-# ===== 应用 LoRA 适配或冻结原始模型 =====
+# ===== Apply LoRA adaptation or freeze the base model =====
 if USE_LORA:
     config = LoraConfig(
         r=8,
@@ -106,7 +106,7 @@ if USE_LORA:
     model = get_peft_model(model, config)
     model.print_trainable_parameters()
 else:
-    # 冻结原始模型参数
+    # Freeze original model parameters
     for param in model.parameters():
         param.requires_grad = False
 
@@ -114,10 +114,10 @@ else:
 
 
 if args.use_parallel and torch.cuda.device_count() > 1:
-    print(f"使用 {torch.cuda.device_count()} 个 GPU 进行训练")
-    # 不要设置CUDA_VISIBLE_DEVICES，这与DataParallel冲突
+    print(f"Using {torch.cuda.device_count()} GPUs for training")
+    # Do not set CUDA_VISIBLE_DEVICES; it conflicts with DataParallel
     
-    # 1. 先加载模型（不移动到设备）
+    # 1. Load the model first (do not move to device yet)
     model = MllamaForConditionalGeneration.from_pretrained(
         model_name, 
         token=hf_token,
@@ -125,7 +125,7 @@ if args.use_parallel and torch.cuda.device_count() > 1:
         low_cpu_mem_usage=True
     )
     
-    # 2. 应用LoRA (如果需要)
+    # 2. Apply LoRA (if needed)
     if USE_LORA:
         config = LoraConfig(
             r=8,
@@ -136,15 +136,15 @@ if args.use_parallel and torch.cuda.device_count() > 1:
         )
         model = get_peft_model(model, config)
     
-    # 3. 然后包装成DataParallel
+    # 3. Wrap with DataParallel
     model = nn.DataParallel(model)
     
-    # 4. 最后移到设备
+    # 4. Finally move to device
     model = model.to(device)
-    print(f"DataParallel启用，使用GPU: {list(range(torch.cuda.device_count()))}")
+    print(f"DataParallel enabled, using GPUs: {list(range(torch.cuda.device_count()))}")
 else:
-    print(f"使用单个设备进行训练: {DEVICE}")
-    # 单GPU模式
+    print(f"Training on a single device: {DEVICE}")
+    # Single-GPU mode
     model = MllamaForConditionalGeneration.from_pretrained(
         model_name, 
         token=hf_token,
@@ -152,7 +152,7 @@ else:
         low_cpu_mem_usage=True
     ).to(device)
 
-# ====================== 加载 Stable Diffusion 用于图像生成 ======================
+# ====================== Load Stable Diffusion for image generation ======================
 image_gen_model = StableDiffusionPipeline.from_pretrained(
     "stabilityai/stable-diffusion-2-1",
     torch_dtype=torch.float16,
@@ -161,70 +161,70 @@ image_gen_model = StableDiffusionPipeline.from_pretrained(
     )
 ).to(device)
 
-# ============== 自定义多模态映射头 =================
+# ============== Custom multimodal mapping head =================
 class MultimodalMappingHead(nn.Module):
     def __init__(self, base_model, use_hyperbolic=True, num_layers=2):
         super().__init__()
         self.use_hyperbolic = use_hyperbolic
         
-        # 处理DataParallel包装的模型
+        # Handle DataParallel-wrapped models
         if isinstance(base_model, nn.DataParallel):
             config = base_model.module.config
-            print("检测到DataParallel模型，从.module访问config")
+            print("Detected DataParallel model, accessing config from .module")
         else:
             config = base_model.config
         
-        # 为多模态模型获取正确的vocab_size
+        # Get the correct vocab_size for multimodal models
         if hasattr(config, 'text_config'):
             self.vocab_size = config.text_config.vocab_size
         elif hasattr(config, 'vocab_size'):
             self.vocab_size = config.vocab_size
         else:
             self.vocab_size = len(tokenizer)
-            print(f"从模型配置中找不到vocab_size，使用tokenizer词表大小: {self.vocab_size}")
+            print(f"Could not find vocab_size in model config; using tokenizer vocab size: {self.vocab_size}")
         
-        # 获取正确的hidden_size
+        # Get the correct hidden_size
         if hasattr(config, 'hidden_size'):
             self.hidden_size = config.hidden_size
         elif hasattr(config, 'text_config'):
             self.hidden_size = config.text_config.hidden_size
         else:
-            # MLLama通常使用4096或8192
+            # MLLama typically uses 4096 or 8192
             self.hidden_size = 4096
-            print(f"无法从配置中确定hidden_size，使用默认值: {self.hidden_size}")
+            print(f"Could not determine hidden_size from config; using default: {self.hidden_size}")
         
-        # 其余代码保持不变
+        # The rest of the code remains unchanged
         self.num_layers = num_layers
         self.manifold = CustomLorentz()
 
-        # 多模态特有的映射层
+        # Multimodal-specific mapping layer
         self.multimodal_adapter = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
-        # 第1层线性变换及归一化
+        # 1st linear transform and normalization
         self.linear1 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.norm1 = nn.LayerNorm(self.hidden_size)
         
-        # 第二层（可选）
+        # Second layer (optional)
         self.linear2 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.norm2 = nn.LayerNorm(self.hidden_size)
 
-        # 超曲分类器：num_features 为 hidden_size+1（多出的1表示 time 分量）
+        # Hyperbolic classifier: num_features = hidden_size + 1 (the extra 1 is the time component)
         self.hyp_cls = LorentzMLR(
             self.manifold,
             num_features=self.hidden_size + 1, 
             num_classes=self.vocab_size
         )
-        # 欧氏分类器
+        # Euclidean classifier
         self.euc_cls = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
     def lorentz_map(self, x, c_param):
         return expmap0(x, k=c_param, dim=-1)
     
     def forward(self, last_hidden_states, c_param):
-        # 通过多模态适配器
+        # Through multimodal adapter
         x = self.multimodal_adapter(last_hidden_states)
         
-        # 标准流程处理
+        # Standard processing
         x = self.linear1(x)
         x = self.norm1(x)
         
@@ -234,7 +234,7 @@ class MultimodalMappingHead(nn.Module):
             x = self.norm2(x)
         
         if self.use_hyperbolic:
-            # 添加 time 分量，再进行超曲映射
+            # Add time component, then perform hyperbolic mapping
             x = self.manifold.add_time(x)
             hyper_embs = self.lorentz_map(x, c_param)
             logits = self.hyp_cls(hyper_embs)
@@ -243,7 +243,7 @@ class MultimodalMappingHead(nn.Module):
 
         return logits
 
-# 图像转换定义 - 适合MLLama模型的标准化
+# Image transform definition - normalization suitable for MLLama
 transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
@@ -251,8 +251,8 @@ transform = transforms.Compose([
                          std=[0.26862954, 0.26130258, 0.27577711])
 ])
 
-# ====================== 加载 COCO 数据集 ======================
-print("使用COCO API加载COCO数据集...")
+# ====================== Load the COCO dataset ======================
+print("Loading the COCO dataset with COCO API...")
 
 train_loader = None
 val_loader = None
@@ -261,36 +261,36 @@ synthetic_dataset = False
 
 from pycocotools.coco import COCO
 
-# 设置COCO数据集路径
+# Set COCO dataset paths
 data_dir = 'coco_dataset'
 train_annotations = os.path.join(data_dir, 'annotations/captions_train2017.json')
 val_annotations = os.path.join(data_dir, 'annotations/captions_val2017.json')
 train_image_dir = os.path.join(data_dir, 'train2017')
 val_image_dir = os.path.join(data_dir, 'val2017')
 
-# 检查数据集文件是否存在
+# Check that dataset files exist
 if not os.path.exists(train_annotations) or not os.path.exists(train_image_dir):
-    raise FileNotFoundError(f"COCO数据集文件未找到。请确保已下载数据集到 {data_dir} 目录")
+    raise FileNotFoundError(f"COCO dataset files not found. Please ensure the dataset is downloaded to the {data_dir} directory")
 
-# 加载COCO API
-print("加载COCO训练集注释...")
+# Load COCO API
+print("Loading COCO training annotations...")
 train_coco = COCO(train_annotations)
-print("加载COCO验证集注释...")
+print("Loading COCO validation annotations...")
 val_coco = COCO(val_annotations)
 
-# 获取所有图像ID
+# Get all image IDs
 train_ids = list(train_coco.imgs.keys())
 val_ids = list(val_coco.imgs.keys())
 
-# 为了测试集，从验证集中分割
+# For the test set, split from the validation set
 random.shuffle(val_ids)
 val_split = int(len(val_ids) * 0.5)
 new_val_ids = val_ids[:val_split]
 test_ids = val_ids[val_split:]
 
-print(f"COCO数据集加载成功！训练集：{len(train_ids)}张图像，验证集：{len(new_val_ids)}张图像，测试集：{len(test_ids)}张图像")
+print(f"COCO dataset loaded successfully! Train: {len(train_ids)} images, Val: {len(new_val_ids)} images, Test: {len(test_ids)} images")
 
-# 创建COCO数据集类
+# Create the COCO dataset class
 class COCODataset(Dataset):
     def __init__(self, coco, img_ids, img_dir, transform=None, max_length=128):
         self.coco = coco
@@ -303,16 +303,16 @@ class COCODataset(Dataset):
         return len(self.img_ids)
     
     def __getitem__(self, idx):
-        # 获取图像ID和图像路径
+        # Get image ID and path
         img_id = self.img_ids[idx]
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.img_dir, img_info['file_name'])
         
-        # 加载图像并调整大小
+        # Load image and resize
         image = Image.open(img_path).convert('RGB')
         image = image.resize((IMAGE_SIZE, IMAGE_SIZE))
         
-        # 获取图像描述
+        # Aspect-ratio-preserving resize
         w, h = image.size
         if w > h:
             new_w = IMAGE_SIZE
@@ -323,7 +323,7 @@ class COCODataset(Dataset):
                 
         image = image.resize((new_w, new_h), Image.LANCZOS)
         
-        # 然后创建正方形图像，将调整后的图像置于中心
+        # Then create a square image and center the resized image
         square_img = Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE), color=(0, 0, 0))
         paste_x = (IMAGE_SIZE - new_w) // 2
         paste_y = (IMAGE_SIZE - new_h) // 2
@@ -332,16 +332,16 @@ class COCODataset(Dataset):
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
         
-        # 随机选择一条描述 - 这行代码可能在您的服务器上缺失
-        caption = random.choice([ann['caption'] for ann in anns]) if anns else "无描述"
+        # Randomly select one caption — this line of code may be missing on your server
+        caption = random.choice([ann['caption'] for ann in anns]) if anns else "No description"
         
         return {
-            "image": square_img,  # 应该使用square_img而不是image
+            "image": square_img,  # Should use square_img instead of image
             "caption": caption,
             "image_id": img_id
         }
-# 如果设置了最大样本数，则随机选择样本
-# 创建数据集
+# If MAX_SAMPLES is set, randomly select samples
+# Create datasets
 train_dataset = COCODataset(train_coco, train_ids[:MAX_SAMPLES] if MAX_SAMPLES else train_ids, 
                            train_image_dir, transform=None, max_length=MAX_LENGTH)
 val_dataset = COCODataset(val_coco, new_val_ids, val_image_dir, 
@@ -350,7 +350,7 @@ test_dataset = COCODataset(val_coco, test_ids, val_image_dir,
                           transform=None, max_length=MAX_LENGTH)
 
 def collate_fn(batch):
-    images = [item["image"] for item in batch]  # 保持为PIL图像列表
+    images = [item["image"] for item in batch]  # Keep as a list of PIL images
     captions = [item["caption"] for item in batch]
     image_ids = [item["image_id"] for item in batch]
         
@@ -360,7 +360,7 @@ def collate_fn(batch):
         "image_id": image_ids
     }
 
-# 创建数据加载器
+# Create dataloaders
 train_loader = DataLoader(
     train_dataset, 
     batch_size=BATCH_SIZE, 
@@ -391,37 +391,37 @@ test_loader = DataLoader(
     collate_fn=collate_fn
 )
 
-print(f"数据加载器创建成功！批次大小: {BATCH_SIZE}")
+print(f"Data loaders created successfully! Batch size: {BATCH_SIZE}")
 
-# =========== 初始化模型组件 ===========
+# =========== Initialize model components ===========
 custom_lm_head = MultimodalMappingHead(model, use_hyperbolic=USE_HYPERBOLIC).to(device)
 learnable_curvature = nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device=device))
 
-# ========= 构建优化器和学习率调度器 ===========
+# ========= Build optimizer and learning-rate scheduler ===========
 curvature_lr = 1e-6
 optimizer = torch.optim.AdamW([
     {"params": list(custom_lm_head.parameters()), "lr": BASE_LR},
     {"params": [learnable_curvature], "lr": curvature_lr}
 ] + ([{"params": [p for p in model.parameters() if p.requires_grad], "lr": BASE_LR}] if USE_LORA else []))
 
-# 计算训练步数
+# Compute training steps
 num_training_steps = len(train_loader) * NUM_EPOCHS
 num_warmup_steps = int(0.1 * num_training_steps)
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
 
 best_loss = float("inf")
 
-# ==================== 辅助函数 ====================
+# ==================== Helper functions ====================
 
 def prepare_multimodal_inputs(batch, processor):
-    """专为MLLama-3.2-Vision模型优化的输入处理"""
+    """Input processing optimized specifically for the MLLama-3.2-Vision model"""
     images = batch["image"]
     captions = batch["caption"]
     
-    # 仅在第一个批次打印形状信息
+    # Print shapes only for the first batch
     static_printed = getattr(prepare_multimodal_inputs, "printed", False)
     
-    # 直接使用processor处理
+    # Directly use the processor
     inputs = processor(
         images=images,
         text=captions,
@@ -431,50 +431,50 @@ def prepare_multimodal_inputs(batch, processor):
         truncation=True
     )
     
-    # 只在第一次打印形状信息
+    # Print shapes only the first time
     if not static_printed:
-        print("\n处理后的输入形状:")
+        print("\nProcessed input shapes:")
         for k, v in inputs.items():
             if isinstance(v, torch.Tensor):
                 print(f"{k}: {v.shape}, dtype={v.dtype}")
         prepare_multimodal_inputs.printed = True
     
-    # 强制移除cross_attention_mask，但不重复打印
+    # Force-remove cross_attention_mask, but avoid repeated prints
     if "cross_attention_mask" in inputs:
         if not static_printed:
-            print("移除problematic cross_attention_mask")
+            print("Removing problematic cross_attention_mask")
         inputs.pop("cross_attention_mask", None)
     
-    # 确保包含所需字段
+    # Ensure required fields are present
     required_fields = ["input_ids", "attention_mask", "pixel_values", "aspect_ratio_ids", "aspect_ratio_mask"]
     for field in required_fields:
         if field not in inputs:
-            raise ValueError(f"处理后的输入缺少关键字段: {field}")
+            raise ValueError(f"Processed inputs are missing a required field: {field}")
     
     return inputs
 
 def prepare_labels(batch):
-    """准备训练标签"""
+    """Prepare training labels"""
     input_ids = batch["input_ids"].clone()
     
-    # 将标签右移一位，最后位置填充-100（忽略）
+    # Shift labels to the right by 1, fill the last position with -100 (ignore)
     labels = torch.roll(input_ids, shifts=1, dims=1)
-    labels[:, 0] = -100  # 忽略第一个位置
-    labels[:, -1] = -100  # 忽略最后一个位置
+    labels[:, 0] = -100  # Ignore the first position
+    labels[:, -1] = -100  # Ignore the last position
     
-    # 将填充部分设置为-100
+    # Set the padding positions to -100
     padding_mask = (input_ids == tokenizer.pad_token_id)
     labels[padding_mask] = -100
     
     return labels
 
 def log_metrics(epoch, avg_loss, ppl, elapsed_time):
-    """记录训练指标"""
+    """Record training metrics"""
     current_lr = optimizer.param_groups[0]['lr']
     print(f"Epoch {epoch}: Loss={avg_loss:.4f}, PPL={ppl:.2f}, LR={current_lr:.2e}, Time={elapsed_time:.2f}s, Curvature={learnable_curvature.item():.4f}")
 
 def save_model(epoch, loss, ppl):
-    """保存模型"""
+    """Save the model"""
     global best_loss
     model_type = "hyp" if USE_HYPERBOLIC else "euc"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -499,7 +499,7 @@ def save_model(epoch, loss, ppl):
         print(f"Model checkpoint saved: {save_path}")
 
 def compute_lm_loss(logits, labels):
-    """计算语言模型损失"""
+    """Compute language model loss"""
     loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
     vocab_size = logits.size(-1)
     logits_2d = logits.view(-1, vocab_size)
@@ -507,11 +507,11 @@ def compute_lm_loss(logits, labels):
     loss = loss_fct(logits_2d, labels_2d)
     return loss
 
-# ====================== 训练模型 ======================
+# ====================== Train the model ======================
 def get_gpu_memory_stats():
-    """获取GPU内存使用情况"""
+    """Get GPU memory usage"""
     if not torch.cuda.is_available():
-        return "GPU不可用"
+        return "GPU not available"
     
     stats = []
     for i in range(torch.cuda.device_count()):
@@ -521,69 +521,69 @@ def get_gpu_memory_stats():
     
     return " | ".join(stats)
 
-# 增强训练指标日志函数
+# Enhanced training-metrics logging function
 def log_metrics(epoch, avg_loss, ppl, elapsed_time):
-    """记录每个epoch详细训练指标"""
+    """Log detailed training metrics for each epoch"""
     current_lr = optimizer.param_groups[0]['lr']
     gpu_stats = get_gpu_memory_stats() if torch.cuda.is_available() else "N/A"
     
     print(f"\n{'='*50}")
-    print(f"Epoch {epoch} 训练总结 (用时: {elapsed_time:.2f}秒)")
+    print(f"Epoch {epoch} training summary (elapsed: {elapsed_time:.2f}s)")
     print(f"{'='*50}")
-    print(f"训练损失: {avg_loss:.4f}")
-    print(f"困惑度(PPL): {ppl:.2f}")
-    print(f"学习率: {current_lr:.2e}")
-    print(f"超曲曲率: {learnable_curvature.item():.4f}")
-    print(f"GPU内存使用: {gpu_stats}")
-    print(f"每批次平均用时: {elapsed_time/len(train_loader):.3f}秒")
-    print(f"预计下一轮用时: {elapsed_time/60:.1f}分钟")
+    print(f"Training loss: {avg_loss:.4f}")
+    print(f"Perplexity (PPL): {ppl:.2f}")
+    print(f"Learning rate: {current_lr:.2e}")
+    print(f"Hyperbolic curvature: {learnable_curvature.item():.4f}")
+    print(f"GPU memory usage: {gpu_stats}")
+    print(f"Average time per batch: {elapsed_time/len(train_loader):.3f}s")
+    print(f"Estimated time for next epoch: {elapsed_time/60:.1f} min")
     print(f"{'='*50}")
 
 def train_model():
     global best_loss
     gradient_accumulation_steps = 4
-    log_interval = 20  # 每20个批次显示一次损失信息
+    log_interval = 20  # Show loss every 20 batches
     
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
         custom_lm_head.train()
         epoch_start_time = time.time()
         total_loss, count = 0.0, 0
-        recent_losses = []  # 存储最近的损失值
-        running_loss = 0.0  # 用于计算短期平均损失
+        recent_losses = []  # Store recent loss values
+        running_loss = 0.0  # For short-term average
         
-        # 在循环外清零梯度
+        # Zero gradients outside the loop
         optimizer.zero_grad()
         
-        # 每个epoch前清理内存
+        # Clear memory before each epoch
         torch.cuda.empty_cache()
 
         for i, batch in enumerate(tqdm(train_loader, desc=f"Training Epoch {epoch}", 
                                       bar_format='{l_bar}{bar:30}{r_bar}')):
             batch_start = time.time()
             
-            # 处理多模态输入
+            # Process multimodal inputs
             inputs = prepare_multimodal_inputs(batch, processor)
             
-            # 将输入移至设备
+            # Move inputs to device
             inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
             
-            # 准备标签
+            # Prepare labels
             labels = prepare_labels(inputs)
             
-            # 前向传播和损失计算
+            # Forward pass and loss computation
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 outputs = model(**inputs, output_hidden_states=True, return_dict=True)
                 logits = custom_lm_head(outputs.hidden_states[-1], learnable_curvature)
                 
-                # 计算并记录原始损失（未缩放）
+                # Compute and record the raw (unscaled) loss
                 batch_loss = compute_lm_loss(logits, labels)
-                loss = batch_loss / gradient_accumulation_steps  # 缩放用于梯度累积
+                loss = batch_loss / gradient_accumulation_steps  # Scaled for gradient accumulation
             
-            # 反向传播
+            # Backpropagation
             loss.backward()
             
-            # 记录每批次损失
+            # Record per-batch loss
             batch_size = len(batch["image"])
             item_loss = batch_loss.item()
             recent_losses.append(item_loss)
@@ -591,15 +591,15 @@ def train_model():
             total_loss += item_loss * batch_size
             count += batch_size
             
-            # 每log_interval批次显示一次平均损失
+            # Print average loss every log_interval batches
             if (i + 1) % log_interval == 0:
                 avg_recent_loss = sum(recent_losses[-log_interval:]) / min(log_interval, len(recent_losses))
                 lr = optimizer.param_groups[0]['lr']
-                print(f"批次 {i+1}/{len(train_loader)}, 损失: {avg_recent_loss:.4f}, 学习率: {lr:.1e}, 曲率: {learnable_curvature.item():.4f}")
+                print(f"Batch {i+1}/{len(train_loader)}, Loss: {avg_recent_loss:.4f}, LR: {lr:.1e}, Curvature: {learnable_curvature.item():.4f}")
             
-            # 累积指定步数后更新参数
+            # Update parameters after specified accumulation steps
             if (i + 1) % gradient_accumulation_steps == 0 or i == len(train_loader) - 1:
-                # 梯度裁剪
+                # Gradient clipping
                 clip_grad_norm_(
                     [p for p in model.parameters() if p.requires_grad] + 
                     list(custom_lm_head.parameters()) + 
@@ -607,32 +607,32 @@ def train_model():
                     max_norm=1.0
                 )
                 
-                # 更新参数
+                # Update parameters
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
                 
-                # 限制曲率范围
+                # Clamp curvature range
                 with torch.no_grad():
                     learnable_curvature.clamp_(1e-3, 1e1)
             
-            # 清理CUDA缓存以减少内存碎片
+            # Empty CUDA cache periodically to reduce fragmentation
             if (i + 1) % (gradient_accumulation_steps * 10) == 0:
                 torch.cuda.empty_cache()
 
-        # 计算并记录每个epoch的详细指标
+        # Compute and log metrics per epoch
         avg_loss = total_loss / count if count > 0 else 9999.0
         ppl = math.exp(avg_loss) if avg_loss < 20 else float("inf")
         epoch_time = time.time() - epoch_start_time
         
-        # 详细的epoch总结日志
+        # Detailed epoch summary
         log_metrics(epoch, avg_loss, ppl, epoch_time)
         
-        # 验证
-        print("\n开始验证...")
+        # Validation
+        print("\nStart validation...")
         val_loss = evaluate_model(val_loader, phase="Validation")
         save_model(epoch, val_loss, math.exp(val_loss) if val_loss < 20 else float("inf"))
-# ====================== 评估函数 ======================
+# ====================== Evaluation function ======================
 def evaluate_model(data_loader, phase="Val"):
     model.eval()
     custom_lm_head.eval()
@@ -642,16 +642,16 @@ def evaluate_model(data_loader, phase="Val"):
     with torch.no_grad():
         for batch in tqdm(data_loader, desc=f"Evaluating {phase}", 
                          bar_format='{l_bar}{bar:30}{r_bar}'):
-            # 处理多模态输入
+            # Process multimodal inputs
             inputs = prepare_multimodal_inputs(batch, processor)
             
-            # 将输入移至设备
+            # Move inputs to device
             inputs = {k: v.to(device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
             
-            # 准备标签
+            # Prepare labels
             labels = prepare_labels(inputs)
             
-            # 前向传播 - 使用autocast确保类型一致性
+            # Forward pass — use autocast to ensure dtype consistency
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 outputs = model(**inputs, output_hidden_states=True, return_dict=True)
                 hidden_states = outputs.hidden_states[-1]
@@ -662,48 +662,48 @@ def evaluate_model(data_loader, phase="Val"):
             total_loss += loss_val.item() * batch_size
             count += batch_size
         
-        # 评估完成后的简洁总结
+        # Concise summary after evaluation
         eval_time = time.time() - start_time
         avg_loss = total_loss / count if count > 0 else float("inf")
         ppl = math.exp(avg_loss) if avg_loss < 20 else float("inf")
         
-        print(f"{phase} 评估结果: Loss={avg_loss:.4f}, PPL={ppl:.2f}, 用时={eval_time:.2f}秒")
+        print(f"{phase} results: Loss={avg_loss:.4f}, PPL={ppl:.2f}, Time={eval_time:.2f}s")
         return avg_loss
-# ====================== 基于图像生成文本 ======================
+# ====================== Generate text from image ======================
 def generate_text_from_image(image_path, max_len=100):
-    """输入图像，输出生成的文本"""
+    """Given an image, generate text"""
     model.eval()
     custom_lm_head.eval()
     
-    # 加载图像
+    # Load image
     if image_path.startswith('http'):
         response = requests.get(image_path)
         image = Image.open(BytesIO(response.content))
     else:
         image = Image.open(image_path)
     
-    # 处理图像
+    # Process image
     image_outputs = processor.image_processor(images=image, return_tensors="pt")
     pixel_values = image_outputs.pixel_values.to(device)
     
-    # 计算宽高比ID
+    # Compute aspect ratio ID
     original_aspect = image.width / image.height
     if 0.9 <= original_aspect <= 1.1:
-        aspect_id = 0  # 正方形
+        aspect_id = 0  # square
     elif original_aspect < 0.9:
-        aspect_id = 1  # 纵向
+        aspect_id = 1  # portrait
     else:
-        aspect_id = 2  # 横向
+        aspect_id = 2  # landscape
     aspect_ratio_ids = torch.tensor([aspect_id], dtype=torch.long).to(device)
     
-    # 创建aspect_ratio_mask
+    # Create aspect_ratio_mask
     aspect_ratio_mask = torch.ones((1, 1), dtype=torch.long).to(device)
     
-    # 处理提示文本
+    # Prepare prompt text
     prompt = "Describe this image:"
     input_ids = processor.tokenizer(prompt, return_tensors="pt").input_ids.to(device)
     
-    # 准备所有必需的输入
+    # Prepare all required inputs
     inputs = {
         "pixel_values": pixel_values,
         "aspect_ratio_ids": aspect_ratio_ids,
@@ -711,7 +711,7 @@ def generate_text_from_image(image_path, max_len=100):
         "input_ids": input_ids
     }
     
-    # 生成文本
+    # Generate text
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
@@ -721,32 +721,32 @@ def generate_text_from_image(image_path, max_len=100):
             top_p=0.9,
         )
     
-    # 解码输出
+    # Decode output
     generated_text = processor.tokenizer.decode(output_ids[0], skip_special_tokens=True)
     return generated_text
 
-# ====================== 基于文本生成图像 ======================
+# ====================== Generate image from text ======================
 def generate_image_from_text(text_prompt, output_path=None):
-    """输入文本提示，生成图像"""
-    # 使用Stable Diffusion生成图像
+    """Given a text prompt, generate an image"""
+    # Use Stable Diffusion to generate an image
     with torch.autocast(device_type="cuda", dtype=torch.float16):
         image = image_gen_model(text_prompt, guidance_scale=7.5).images[0]
     
-    # 保存图像
+    # Save image
     if output_path:
         image.save(output_path)
     
     return image
 
-# ====================== 主执行流程 ======================
+# ====================== Main execution ======================
 if __name__ == "__main__":
     print(f"USE_HYPERBOLIC = {USE_HYPERBOLIC}")
     print(f"USE_LORA = {USE_LORA}")
     
-    # 训练模型
+    # Train the model
     train_model()
     
-    # 测试集评估
+    # Evaluate on test set
     print("\n=== Testing ===")
     evaluate_model(test_loader, phase="Test")
     
