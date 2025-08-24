@@ -133,4 +133,4 @@ python final_test.py \
 - `HyperLib` (Lorentz geometry components)
 
 ### Current progress
-
+![image](https://github.com/NickyoyoSu/Hyperboilic-LLM/edit/main/hyperbolic_mapping/images/89121741355510_.pic.jpg)
