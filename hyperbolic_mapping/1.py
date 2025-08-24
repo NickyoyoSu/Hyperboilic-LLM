@@ -59,18 +59,18 @@ def get_parser():
     parser.add_argument("--eval_steps", type=int, default=500, 
                     help="Evaluate model every N steps")
     parser.add_argument("--resume", type=str, default="", 
-                    help="从检查点恢复训练的路径")
+                    help="Path to resume training from a checkpoint")
     parser.add_argument("--start_epoch", type=int, default=1,
-                    help="恢复训练的起始epoch")
+                    help="Start of recovery training epoch")
     parser.add_argument("--mode", type=str, default="train", 
                       choices=["train", "eval", "demo", "research"],
-                      help="运行模式: train=训练, eval=评估, demo=演示, research=研究")
+                      help="Run mode: train=training, eval=evaluation, demo=demonstration, research=research")
     return parser
     
 
 args = get_parser().parse_args()
 
-# 设置随机种子以确保可重复性
+# Setting a random seed to ensure reproducibility
 torch.manual_seed(args.seed)
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -88,20 +88,20 @@ MAX_SAMPLES = args.max_samples
 IMAGE_SIZE = args.image_size
 CURVATURE_LR = args.curvature_lr
 
-# ===================== 加载视觉语言模型 =====================
-print(f"{'='*40}\n加载模型: Deepseek-AI/Janus-Pro\n{'='*40}")
+# ===================== Loading the visual language model =====================
+print(f"{'='*40}\n Loading the model: Deepseek-AI/Janus-Pro\n{'='*40}")
 
 model_name = "deepseek-ai/Janus-Pro-7B"
 device = torch.device(DEVICE)
 
-# 加载处理器和模型
+# Loading the processor and model
 processor = VLChatProcessor.from_pretrained(model_name)
 tokenizer = processor.tokenizer
 
-# 模型加载与并行处理
+# Model loading and parallel processing
 if args.use_parallel and torch.cuda.device_count() > 1:
-    print(f"使用 {torch.cuda.device_count()} 个 GPU 进行训练")
-    # 先加载模型（不移动到设备）
+    print(f"use {torch.cuda.device_count()} 个 GPU Conduct training")
+    # Load the model first (not move to device)
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
         torch_dtype=torch.bfloat16,
@@ -109,29 +109,29 @@ if args.use_parallel and torch.cuda.device_count() > 1:
         trust_remote_code=True
     )
     
-    # 应用LoRA (如果需要)
+    # Apply LoRA (if needed)
     if USE_LORA:
         config = LoraConfig(
             r=16,
             lora_alpha=32,
             lora_dropout=0.1,
             bias="none",
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]  # Janus 的注意力模块名称
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]  # Janus's attention module name
         )
         model = get_peft_model(model, config)
         model.print_trainable_parameters()
     else:
-        # 冻结原始模型参数
+        # Freeze original model parameters
         for param in model.parameters():
             param.requires_grad = False
     
-    # 然后包装成DataParallel
+    # Then package it into DataParallel
     model = nn.DataParallel(model)
     model = model.to(device)
-    print(f"DataParallel启用，使用GPU: {list(range(torch.cuda.device_count()))}")
+    print(f"DataParallel enabled，Using GPU: {list(range(torch.cuda.device_count()))}")
 else:
-    print(f"使用单个设备进行训练: {DEVICE}")
-    # 单GPU模式
+    print(f"Training with a single device: {DEVICE}")
+    # Single GPU mode
     model = AutoModelForCausalLM.from_pretrained(
         model_name, 
         torch_dtype=torch.bfloat16,
@@ -139,7 +139,7 @@ else:
         trust_remote_code=True
     ).to(device)
     
-    # 应用LoRA或冻结参数
+    # Apply LoRA or freeze parameters
     if USE_LORA:
         config = LoraConfig(
             r=16,
@@ -151,89 +151,89 @@ else:
         model = get_peft_model(model, config)
         model.print_trainable_parameters()
     else:
-        # 冻结原始模型参数
+        # Freeze original model parameters
         for param in model.parameters():
             param.requires_grad = False
 
-# ============== 自定义多模态映射头 =================
+# ============== Customizing the Multimodal Mapping Header =================
 class MultimodalMappingHead(nn.Module):
     def __init__(self, base_model, use_hyperbolic=True, num_layers=2):
         super().__init__()
         self.use_hyperbolic = use_hyperbolic
         
-        # 处理DataParallel包装的模型
+        # Handling DataParallel wrapped models
         if isinstance(base_model, nn.DataParallel):
             config = base_model.module.config
         else:
             config = base_model.config
         
-        # 获取vocab_size
+        # Get vocab_size
         self.vocab_size = config.vocab_size if hasattr(config, 'vocab_size') else len(tokenizer)
         
-        # 获取hidden_size
+        # Get hidden_size
         self.hidden_size = config.hidden_size if hasattr(config, 'hidden_size') else 4096
 
         
-        print(f"映射头配置: 词表大小={self.vocab_size}, 隐藏层大小={self.hidden_size}")
+        print(f"Mapping head configuration: vocabulary size = {self.vocab_size}, hidden layer size = {self.hidden_size}")
         
         self.num_layers = num_layers
         self.manifold = CustomLorentz()
 
-        # 多模态特有的映射层，处理多模态信息融合
+        # Multimodal-specific mapping layer to handle multimodal information fusion
         self.multimodal_adapter = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
-        # 线性变换与归一化层
+        # Linear transformation and normalization layer
         self.linear1 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.norm1 = nn.LayerNorm(self.hidden_size)
         
-        # 第二层（可选）
+        # Second layer (optional)
         if num_layers >= 2:
             self.linear2 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
             self.norm2 = nn.LayerNorm(self.hidden_size)
         
-        # 第三层（可选）- 增加模型容量
+        # Third layer (optional) - increases model capacity
         if num_layers >= 3:
             self.linear3 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
             self.norm3 = nn.LayerNorm(self.hidden_size)
 
-        # 超曲分类器：num_features 为 hidden_size+1（多出的1表示 time 分量）
+        # Hypercurve Classifier：num_features 为 hidden_size+1（The extra 1 represents the time component）
         self.hyp_cls = LorentzMLR(
             self.manifold,
             num_features=self.hidden_size + 1, 
             num_classes=self.vocab_size
         )
-        # 欧氏分类器
+        # Euclidean classifier
         self.euc_cls = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
-        print(f"初始化{'超曲' if use_hyperbolic else '欧氏'}映射头，层数: {num_layers}")
+        print(f"Initialize {'hyperbolic' if use_hyperbolic else 'Euclidean'} mapping header, number of layers: {num_layers}")
 
     def lorentz_map(self, x, c_param):
         return expmap0(x, k=c_param, dim=-1)
     
     def forward(self, last_hidden_states, c_param):
-        # 通过多模态适配器
+        # Via multimodal adapter
         x = self.multimodal_adapter(last_hidden_states)
         
-        # 第一层处理
+        # First layer processing
         x = self.linear1(x)
         x = self.norm1(x)
         x = torch.relu(x)
         
-        # 第二层处理（如果有）
+        # Second layer processing (if any)
         if self.num_layers >= 2:
             x = self.linear2(x)
             x = self.norm2(x)
             x = torch.relu(x)
         
-        # 第三层处理（如果有）
+        # Third-tier processing (if any)
         if self.num_layers >= 3:
             x = self.linear3(x)
             x = self.norm3(x)
             x = torch.relu(x)
         
-        # 根据几何类型选择分类器
+        # Selecting a classifier based on geometry type
         if self.use_hyperbolic:
-            # 添加 time 分量，再进行超曲映射
+            # Add the time component and then perform hypercurve mapping
             x = self.manifold.add_time(x)
             hyper_embs = self.lorentz_map(x, c_param)
             logits = self.hyp_cls(hyper_embs)
@@ -242,41 +242,41 @@ class MultimodalMappingHead(nn.Module):
 
         return logits
 
-# 图像转换定义 - 适合MLLama模型的标准化
+# Image transformation definition - normalization suitable for MLLama model
 transform = transforms.Compose([
     transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 ])
 
-# ====================== 加载 COCO 数据集 ======================
-print(f"{'='*40}\n加载COCO数据集\n{'='*40}")
+# ====================== Loading the COCO dataset ======================
+print(f"{'='*40}\nLoading the COCO dataset\n{'='*40}")
 
 try:
     from pycocotools.coco import COCO
     
-    # 设置COCO数据集路径
+    # Set the COCO dataset path
     data_dir = 'coco_dataset'
     train_annotations = os.path.join(data_dir, 'annotations/captions_train2017.json')
     val_annotations = os.path.join(data_dir, 'annotations/captions_val2017.json')
     train_image_dir = os.path.join(data_dir, 'train2017')
     val_image_dir = os.path.join(data_dir, 'val2017')
     
-    # 检查数据集文件是否存在
+    # Check if the dataset file exists
     if not os.path.exists(train_annotations) or not os.path.exists(train_image_dir):
-        raise FileNotFoundError(f"COCO数据集文件未找到。请确保已下载数据集到 {data_dir} 目录")
+        raise FileNotFoundError(f"COCO dataset file not found. Please make sure you have downloaded the dataset to the {data_dir} directory")
     
-    # 加载COCO API
-    print("加载COCO训练集注释...")
+    # Loading the COCO API
+    print("Load COCO training set annotations...")
     train_coco = COCO(train_annotations)
-    print("加载COCO验证集注释...")
+    print("Load COCO training set annotations...")
     val_coco = COCO(val_annotations)
     
-    # 获取所有图像ID
+    # Get all image IDs
     train_ids = list(train_coco.imgs.keys())
     val_ids = list(val_coco.imgs.keys())
     
-    # 为了测试集，从验证集中分割
+    # For the test set, split from the validation set
     random.shuffle(val_ids)
     val_split = int(len(val_ids) * 0.5)
     new_val_ids = val_ids[:val_split]
@@ -287,9 +287,9 @@ try:
         new_val_ids = new_val_ids[:MAX_SAMPLES//5]
         test_ids = test_ids[:MAX_SAMPLES//5]
     
-    print(f"数据集大小 - 训练集：{len(train_ids)}张图像，验证集：{len(new_val_ids)}张图像，测试集：{len(test_ids)}张图像")
+    print(f"Dataset size - training set: {len(train_ids)} images, validation set: {len(new_val_ids)} images, test set: {len(test_ids)} images")
     
-    # 创建COCO数据集类
+    # Create COCO dataset class
     class COCODataset(Dataset):
         def __init__(self, coco, img_ids, img_dir, max_length=128):
             self.coco = coco
@@ -301,27 +301,27 @@ try:
             return len(self.img_ids)
         
         def __getitem__(self, idx):
-            # 获取图像ID和图像路径
+            # Get the image ID and image path
             img_id = self.img_ids[idx]
             img_info = self.coco.loadImgs(img_id)[0]
             img_path = os.path.join(self.img_dir, img_info['file_name'])
             
-            # 加载图像
+            # Loading an image
             try:
                 image = Image.open(img_path).convert('RGB')
             except Exception as e:
-                print(f"无法加载图像 {img_path}: {e}")
-                # 创建空白图像作为替代
+                print(f"Unable to load image {img_path}: {e}")
+                # Create a blank image as an alternative
                 image = Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE), color='black')
             
-            # 获取图像描述
+            # Get image description
             ann_ids = self.coco.getAnnIds(imgIds=img_id)
             anns = self.coco.loadAnns(ann_ids)
             
-            # 随机选择一条描述
-            caption = random.choice([ann['caption'] for ann in anns]) if anns else "无描述"
+            # Randomly select a description
+            caption = random.choice([ann['caption'] for ann in anns]) if anns else "No description"
             
-            # 正方形处理图像 (保持宽高比)
+            # Square image processing (maintain aspect ratio)
             w, h = image.size
             if w > h:
                 new_w = IMAGE_SIZE
@@ -332,7 +332,7 @@ try:
                     
             image = image.resize((new_w, new_h), Image.LANCZOS)
             
-            # 创建正方形图像
+            # Create a square image
             square_img = Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE), color=(0, 0, 0))
             paste_x = (IMAGE_SIZE - new_w) // 2
             paste_y = (IMAGE_SIZE - new_h) // 2
@@ -355,7 +355,7 @@ try:
             "image_id": image_ids
         }
     
-    # 创建数据集
+    # Create a dataset
     train_dataset = COCODataset(train_coco, train_ids, train_image_dir, max_length=MAX_LENGTH)
     val_dataset = COCODataset(val_coco, new_val_ids, val_image_dir, max_length=MAX_LENGTH)
     test_dataset = COCODataset(val_coco, test_ids, val_image_dir, max_length=MAX_LENGTH)
