@@ -31,16 +31,16 @@ def load_text_from_file(filepath):
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Train a language model with Hyperbolic or Euclidean mapping")
-    # 超曲映射开关
+    # Hyperbolic mapping switch
     parser.add_argument("--use_hyperbolic", action="store_true", help="Use hyperbolic mapping (default: Euclidean)")
-    # LoRA 开关，默认 False，不使用 LoRA
+    # LoRA switch, default False, LoRA is disabled
     parser.add_argument("--use_lora", action="store_true", help="Enable LoRA adaptation for fine-tuning")
     parser.add_argument("--num_epochs", type=int, default=20, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size")
     parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for optimizer")
     parser.add_argument("--max_length", type=int, default=256, help="Maximum number of tokens per sample")
     parser.add_argument("--min_tokens", type=int, default=5, help="Minimum tokens required per line")
-    parser.add_argument("--max_samples", type=int, default=150000, help="Maximum entity numbers for the dataset to load")
+    parser.add_argument("--max_samples", type=int, default=150000, help="Maximum number of entities to load from dataset")
     parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu",
                         help="Device to use for training (e.g., 'cuda:0', 'cpu')")
     return parser
@@ -78,7 +78,7 @@ if USE_LORA:
     model = get_peft_model(model, config)
     model.print_trainable_parameters()
 else:
-    # 冻结原模型的参数，只训练后续添加的层
+    # Freeze the original model parameters, only train the additional layers
     for param in model.parameters():
         param.requires_grad = False
 
@@ -92,21 +92,21 @@ class MappingHead(nn.Module):
         self.num_layers = num_layers
         self.manifold = CustomLorentz()
 
-        # 第1层线性变换及归一化
+        # First linear layer + normalization
         self.linear1 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.norm1 = nn.LayerNorm(self.hidden_size)
         
-        # 第二层（可选）
+        # Second layer (optional)
         self.linear2 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.norm2 = nn.LayerNorm(self.hidden_size)
 
-        # 超曲分类器：num_features 为 hidden_size+1（多出的1表示 time 分量）
+        # Hyperbolic classifier: num_features = hidden_size+1 (the +1 is for the time dimension)
         self.hyp_cls = LorentzMLR(
             self.manifold,
             num_features=self.hidden_size + 1, 
             num_classes=self.vocab_size
         )
-        # 欧氏分类器
+        # Euclidean classifier
         self.euc_cls = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
 
     def lorentz_map(self, x, c_param):
@@ -122,7 +122,7 @@ class MappingHead(nn.Module):
             x = self.norm2(x)
         
         if self.use_hyperbolic:
-            # 添加 time 分量，再进行超曲映射
+            # Add time component and perform hyperbolic mapping
             x = self.manifold.add_time(x)
             hyper_embs = self.lorentz_map(x, c_param)
             logits = self.hyp_cls(hyper_embs)
@@ -146,25 +146,25 @@ learnable_curvature = nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device
 all_params = list(model.parameters()) + list(custom_lm_head.parameters()) + [learnable_curvature]
 
 # ========= Build Optimizer and Scheduler ===========
-# 为 learnable_curvature 单独设定较小的 lr
+# Set a smaller lr for learnable_curvature
 curvature_lr = 1e-6
 optimizer = torch.optim.AdamW([
     {"params": list(custom_lm_head.parameters()), "lr": BASE_LR},
     {"params": [learnable_curvature], "lr": curvature_lr}
 ] + ( [{"params": list(model.parameters()), "lr": BASE_LR}] if USE_LORA else []) )
 
-# 计算训练步数（每个 epoch 的步数 * epoch 数）
+# Calculate training steps (steps per epoch * number of epochs)
 num_training_steps = (len(train_texts) // BATCH_SIZE) * NUM_EPOCHS
-num_warmup_steps = int(0.1 * num_training_steps)  # warmup 10%
+num_warmup_steps = int(0.1 * num_training_steps)  # 10% warmup
 scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
 
 best_loss = float("inf")
 
 # ========== Logging Helper ==========
 def log_metrics(epoch, avg_loss, ppl, elapsed_time):
-    # 获取当前学习率
+    # Get current learning rate
     current_lr = optimizer.param_groups[0]['lr']
-    # 打印日志信息
+    # Print log info
     print(f"Epoch {epoch}: Loss={avg_loss:.4f}, PPL={ppl:.2f}, LR={current_lr:.2e}, Time={elapsed_time:.2f}s, Curvature={learnable_curvature.item():.4f}")
 
 # ====================== Save Model ======================
