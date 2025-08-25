@@ -12,54 +12,54 @@ from HyperLib.geoopt.manifolds.lorentz.math import expmap0
 from HyperLib.lorentz.layers.LMLR import LorentzMLR
 from HyperLib.lorentz.manifold import CustomLorentz
 
-# 参数解析
-parser = argparse.ArgumentParser(description="使用训练好的检查点进行多模态推理")
-parser.add_argument("--checkpoint", type=str, required=True, help="检查点文件路径 (.pth)")
-parser.add_argument("--lora_dir", type=str, default="", help="LoRA目录路径（如果使用LoRA）")
-parser.add_argument("--image", type=str, default="", help="输入图像路径或URL")
-parser.add_argument("--text", type=str, default="", help="用于生成图像的提示文本")
+# Argument parser
+parser = argparse.ArgumentParser(description="Perform multimodal inference using a trained checkpoint")
+parser.add_argument("--checkpoint", type=str, required=True, help="Path to the checkpoint file (.pth)")
+parser.add_argument("--lora_dir", type=str, default="", help="Path to the LoRA directory (if using LoRA)")
+parser.add_argument("--image", type=str, default="", help="Path or URL to the input image")
+parser.add_argument("--text", type=str, default="", help="Prompt text for generating an image")
 parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-parser.add_argument("--image_size", type=int, default=224, help="输入图像大小")
+parser.add_argument("--image_size", type=int, default=224, help="Input image size")
 args = parser.parse_args()
 
-# 设备设置
+# Device setup
 device = torch.device(args.device)
 
-# 自定义多模态映射头
+# Custom multimodal mapping head
 class MultimodalMappingHead(nn.Module):
     def __init__(self, base_model, use_hyperbolic=True, num_layers=3):
         super().__init__()
         self.use_hyperbolic = use_hyperbolic
         
-        # 获取config
+        # Get config
         if isinstance(base_model, nn.DataParallel):
             config = base_model.module.config
         else:
             config = base_model.config
         
-        # 获取vocab_size
+        # Get vocab_size
         if hasattr(config, 'text_config'):
             self.vocab_size = config.text_config.vocab_size
         elif hasattr(config, 'vocab_size'):
             self.vocab_size = config.vocab_size
         else:
-            self.vocab_size = 32000  # 默认值
+            self.vocab_size = 32000  # Default
         
-        # 获取hidden_size
+        # Get hidden_size
         if hasattr(config, 'hidden_size'):
             self.hidden_size = config.hidden_size
         elif hasattr(config, 'text_config'):
             self.hidden_size = config.text_config.hidden_size
         else:
-            self.hidden_size = 4096  # 默认值
+            self.hidden_size = 4096  # Default
         
         self.num_layers = num_layers
         self.manifold = CustomLorentz()
 
-        # 多模态适配器
+        # Multimodal adapter
         self.multimodal_adapter = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
-        # 线性层和归一化
+        # Linear layers and normalization
         self.linear1 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.norm1 = nn.LayerNorm(self.hidden_size)
         
@@ -71,7 +71,7 @@ class MultimodalMappingHead(nn.Module):
             self.linear3 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
             self.norm3 = nn.LayerNorm(self.hidden_size)
 
-        # 分类器
+        # Classifiers
         self.hyp_cls = LorentzMLR(
             self.manifold,
             num_features=self.hidden_size + 1, 
@@ -83,27 +83,27 @@ class MultimodalMappingHead(nn.Module):
         return expmap0(x, k=c_param, dim=-1)
     
     def forward(self, last_hidden_states, c_param):
-        # 多模态适配
+        # Multimodal adaptation
         x = self.multimodal_adapter(last_hidden_states)
         
-        # 第一层
+        # First layer
         x = self.linear1(x)
         x = self.norm1(x)
         x = torch.relu(x)
         
-        # 第二层(如果有)
+        # Second layer (if present)
         if self.num_layers >= 2:
             x = self.linear2(x)
             x = self.norm2(x)
             x = torch.relu(x)
         
-        # 第三层(如果有)
+        # Third layer (if present)
         if self.num_layers >= 3:
             x = self.linear3(x)
             x = self.norm3(x)
             x = torch.relu(x)
         
-        # 基于几何选择分类器
+        # Choose classifier based on geometry
         if self.use_hyperbolic:
             x = self.manifold.add_time(x)
             hyper_embs = self.lorentz_map(x, c_param)
@@ -114,15 +114,15 @@ class MultimodalMappingHead(nn.Module):
         return logits
 
 def load_model():
-    """加载MLLama-3.2-Vision模型"""
-    print("加载MLLama-3.2-Vision模型...")
+    """Load the MLLama-3.2-Vision model"""
+    print("Loading MLLama-3.2-Vision model...")
     hf_token = "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"
     model_name = "meta-llama/Llama-3.2-11B-Vision"
     
     processor = AutoProcessor.from_pretrained(model_name, token=hf_token)
     
     try:
-        # 加载MLLama模型
+        # Load MLLama model
         model = MllamaForConditionalGeneration.from_pretrained(
             model_name, 
             token=hf_token,
@@ -130,13 +130,13 @@ def load_model():
             low_cpu_mem_usage=True
         ).to(device)
     except Exception as e:
-        print(f"错误：无法加载原始训练模型 {model_name}")
-        print(f"详细错误: {e}")
-        print("请确保您有足够的GPU内存并正确配置环境")
+        print(f"Error: Failed to load the original model {model_name}")
+        print(f"Details: {e}")
+        print("Please ensure you have sufficient GPU memory and a properly configured environment.")
         sys.exit(1)
     
-    # 加载StableDiffusion用于图像生成
-    print("加载Stable Diffusion模型...")
+    # Load Stable Diffusion for image generation
+    print("Loading Stable Diffusion model...")
     image_gen_model = StableDiffusionPipeline.from_pretrained(
         "stabilityai/stable-diffusion-2-1",
         torch_dtype=torch.float16,
@@ -148,39 +148,39 @@ def load_model():
     return processor, model, image_gen_model
 
 def load_checkpoint(checkpoint_path, model, lora_dir=""):
-    """加载训练好的检查点"""
-    print(f"加载检查点: {checkpoint_path}")
+    """Load the trained checkpoint"""
+    print(f"Loading checkpoint: {checkpoint_path}")
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"检查点不存在: {checkpoint_path}")
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     
-    # 加载检查点
+    # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # 检查是否是超曲模型
+    # Check if it's a hyperbolic model
     is_hyperbolic = "hyp" in os.path.basename(checkpoint_path)
     
-    # 创建并加载自定义头部
+    # Create and load custom head
     custom_lm_head = MultimodalMappingHead(model, use_hyperbolic=is_hyperbolic, num_layers=3).to(device)
     custom_lm_head.load_state_dict(checkpoint["lm_head_state"])
     
-    # 加载曲率参数
+    # Load curvature parameter
     curvature = torch.tensor(checkpoint["curvature"], device=device)
     
-    # 加载LoRA权重(如果指定)
+    # Load LoRA weights (if specified)
     if lora_dir and os.path.exists(lora_dir):
-        print(f"加载LoRA权重: {lora_dir}")
+        print(f"Loading LoRA weights: {lora_dir}")
         if isinstance(model, nn.DataParallel):
             model.module.load_adapter(lora_dir)
         else:
             model.load_adapter(lora_dir)
     elif "lora" in checkpoint_path.lower():
-        # 尝试从检查点路径找到LoRA
+        # Try to locate LoRA in the checkpoint path
         parent_dir = os.path.dirname(checkpoint_path)
         lora_dirs = [d for d in os.listdir(parent_dir) if d.startswith("lora_")]
         if lora_dirs:
             newest_lora = sorted(lora_dirs)[-1]
             lora_path = os.path.join(parent_dir, newest_lora)
-            print(f"自动加载LoRA权重: {lora_path}")
+            print(f"Automatically loading LoRA weights: {lora_path}")
             if isinstance(model, nn.DataParallel):
                 model.module.load_adapter(lora_path)
             else:
@@ -189,21 +189,21 @@ def load_checkpoint(checkpoint_path, model, lora_dir=""):
     return custom_lm_head, curvature, is_hyperbolic
 
 def generate_text_from_image(image_path, model, processor, custom_lm_head, curvature, max_len=100):
-    """从图像生成文本"""
+    """Generate text from image"""
     model.eval()
     custom_lm_head.eval()
     
-    # 加载图像
+    # Load image
     if image_path.startswith('http'):
         response = requests.get(image_path)
         image = Image.open(BytesIO(response.content))
     else:
         image = Image.open(image_path)
     
-    # 处理图像
-    inputs = processor(images=image, text="描述这张图片:", return_tensors="pt").to(device)
+    # Process image
+    inputs = processor(images=image, text="Describe this image:", return_tensors="pt").to(device)
     
-    # 生成文本
+    # Generate text
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -213,12 +213,12 @@ def generate_text_from_image(image_path, model, processor, custom_lm_head, curva
             top_p=0.9,
         )
     
-    # 解码输出
+    # Decode output
     generated_text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
     return generated_text
 
 def generate_image_from_text(text_prompt, image_gen_model, output_path=None):
-    """从文本生成图像"""
+    """Generate image from text"""
     with torch.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", 
                       dtype=torch.float16):
         image = image_gen_model(text_prompt, guidance_scale=7.5).images[0]
@@ -228,36 +228,36 @@ def generate_image_from_text(text_prompt, image_gen_model, output_path=None):
     
     return image
 
-# 主函数
+# Main function
 def main():
-    # 加载模型
+    # Load models
     processor, model, image_gen_model = load_model()
     
-    # 加载检查点
+    # Load checkpoint
     custom_lm_head, curvature, is_hyperbolic = load_checkpoint(
         args.checkpoint, model, args.lora_dir
     )
     
     print(f"{'='*50}")
-    print(f"模型已加载 - 几何空间: {'超曲率' if is_hyperbolic else '欧几里得'}, 曲率: {curvature.item():.4f}")
+    print(f"Model loaded - Geometry: {'Hyperbolic' if is_hyperbolic else 'Euclidean'}, Curvature: {curvature.item():.4f}")
     print(f"{'='*50}")
     
-    # 图像到文本
+    # Image-to-text
     if args.image:
-        print(f"\n=== 从图像生成文本 ===")
+        print(f"\n=== Generating text from image ===")
         generated_text = generate_text_from_image(
             args.image, model, processor, custom_lm_head, curvature
         )
-        print(f"图像路径: {args.image}")
-        print(f"生成的描述: {generated_text}")
+        print(f"Image path: {args.image}")
+        print(f"Generated description: {generated_text}")
     
-    # 文本到图像
+    # Text-to-image
     if args.text:
-        print(f"\n=== 从文本生成图像 ===")
+        print(f"\n=== Generating image from text ===")
         output_path = "generated_image.jpg"
         generate_image_from_text(args.text, image_gen_model, output_path)
-        print(f"提示文本: {args.text}")
-        print(f"生成的图像已保存到: {output_path}")
+        print(f"Prompt text: {args.text}")
+        print(f"Generated image saved to: {output_path}")
 
 if __name__ == "__main__":
     main()
