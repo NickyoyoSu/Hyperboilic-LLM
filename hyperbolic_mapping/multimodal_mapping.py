@@ -1,89 +1,217 @@
-import os
 import sys
-import torch
+import os
+import time
+import math
 import argparse
+import traceback
+import random
+import numpy as np
+from tqdm import tqdm
+from datetime import datetime
 from PIL import Image
 import requests
 from io import BytesIO
+from torch.utils.data import DataLoader, Dataset, random_split
+from PIL import Image, ImageDraw
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from janus.models import MultiModalityCausalLM, VLChatProcessor
+from janus.utils.io import load_pil_images
+
+from sklearn.model_selection import train_test_split
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+import torch
 import torch.nn as nn
-from transformers import AutoProcessor, MllamaForConditionalGeneration
-from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
+from torch.nn.utils import clip_grad_norm_
+from datasets import load_dataset
+from peft import LoraConfig, get_peft_model
+from transformers import AutoProcessor, MllamaForConditionalGeneration, get_linear_schedule_with_warmup
+
+from torchvision import transforms
+
 from HyperLib.geoopt.manifolds.lorentz.math import expmap0
 from HyperLib.lorentz.layers.LMLR import LorentzMLR
 from HyperLib.lorentz.manifold import CustomLorentz
 
-# Argument parser
-parser = argparse.ArgumentParser(description="Perform multimodal inference using a trained checkpoint")
-parser.add_argument("--checkpoint", type=str, required=True, help="Path to the checkpoint file (.pth)")
-parser.add_argument("--lora_dir", type=str, default="", help="Path to the LoRA directory (if using LoRA)")
-parser.add_argument("--image", type=str, default="", help="Path or URL to the input image")
-parser.add_argument("--text", type=str, default="", help="Prompt text for generating an image")
-parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-parser.add_argument("--image_size", type=int, default=224, help="Input image size")
-args = parser.parse_args()
 
-# Device setup
-device = torch.device(args.device)
+def get_parser():
+    parser = argparse.ArgumentParser(description="Train a multimodal vision-language model with Hyperbolic mapping")
+    parser.add_argument("--use_hyperbolic", action="store_true", help="Use hyperbolic mapping (default: Euclidean)")
+    parser.add_argument("--use_lora", action="store_true", help="Enable LoRA adaptation for fine-tuning")
+    parser.add_argument("--num_epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=2, help="Training batch size")
+    parser.add_argument("--learning_rate", type=float, default=1e-5, help="Learning rate for optimizer")
+    parser.add_argument("--max_length", type=int, default=256, help="Maximum number of tokens per sample")
+    parser.add_argument("--max_samples", type=int, default=10000, help="Maximum samples for the dataset to load")
+    parser.add_argument("--image_size", type=int, default=224, help="Size of input images (224 for MLLama)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                    help="Device to use (e.g., 'cuda', 'cuda:1', 'cpu')")
+    parser.add_argument("--gpu_ids", type=str, default="0", 
+                    help="Comma-separated GPU IDs to use (e.g., '0,1,2')")
+    parser.add_argument("--use_parallel", action="store_true",
+                    help="Use DataParallel for multi-GPU training")
+    parser.add_argument("--curvature_lr", type=float, default=1e-6, 
+                    help="Learning rate for the curvature parameter")
+    parser.add_argument("--save_interval", type=int, default=1, 
+                    help="Save checkpoint every N epochs")
+    parser.add_argument("--eval_steps", type=int, default=2000, 
+                    help="Evaluate the model every N steps")
+    parser.add_argument("--resume", type=str, default="", 
+                    help="Path to resume training from a checkpoint")
+    parser.add_argument("--start_epoch", type=int, default=1,
+                    help="Starting epoch when resuming training")
+    parser.add_argument("--mode", type=str, default="train", 
+                      choices=["train", "eval", "demo", "research"],
+                      help="Run mode: train=training, eval=evaluation, demo=demonstration, research=research")
+    return parser
+    
 
-# Custom multimodal mapping head
+args = get_parser().parse_args()
+
+# Set random seeds for reproducibility
+torch.manual_seed(args.seed)
+random.seed(args.seed)
+np.random.seed(args.seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(args.seed)
+
+USE_HYPERBOLIC = args.use_hyperbolic
+USE_LORA = args.use_lora
+NUM_EPOCHS = args.num_epochs
+BATCH_SIZE = args.batch_size
+BASE_LR = args.learning_rate
+MAX_LENGTH = args.max_length
+DEVICE = args.device
+MAX_SAMPLES = args.max_samples
+IMAGE_SIZE = args.image_size
+CURVATURE_LR = args.curvature_lr
+
+# ===================== Load the vision-language model =====================
+print(f"{'='*40}\nLoading model: Deepseek-AI/Janus-Pro\n{'='*40}")
+
+model_name = "deepseek-ai/Janus-Pro-7B"
+device = torch.device(DEVICE)
+
+# Load processor and model
+processor = VLChatProcessor.from_pretrained(model_name)
+tokenizer = processor.tokenizer
+
+# Model loading and parallel processing
+if args.use_parallel and torch.cuda.device_count() > 1:
+    print(f"Using {torch.cuda.device_count()} GPUs for training")
+    # Load the model first (do not move to device yet)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
+    )
+    
+    # Apply LoRA (if needed)
+    if USE_LORA:
+        config = LoraConfig(
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            bias="none",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]  # Janus attention module names
+        )
+        model = get_peft_model(model, config)
+        model.print_trainable_parameters()
+    else:
+        # Freeze original model parameters
+        for param in model.parameters():
+            param.requires_grad = False
+    
+    # Then wrap in DataParallel
+    model = nn.DataParallel(model)
+    model = model.to(device)
+    print(f"DataParallel enabled, using GPUs: {list(range(torch.cuda.device_count()))}")
+else:
+    print(f"Training with a single device: {DEVICE}")
+    # Single-GPU mode
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        trust_remote_code=True
+    ).to(device)
+    
+    # Apply LoRA or freeze parameters
+    if USE_LORA:
+        config = LoraConfig(
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.1,
+            bias="none",
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]
+        )
+        model = get_peft_model(model, config)
+        model.print_trainable_parameters()
+    else:
+        # Freeze original model parameters
+        for param in model.parameters():
+            param.requires_grad = False
+
+# ============== Custom multimodal mapping head =================
 class MultimodalMappingHead(nn.Module):
-    def __init__(self, base_model, use_hyperbolic=True, num_layers=3):
+    def __init__(self, base_model, use_hyperbolic=True, num_layers=2):
         super().__init__()
         self.use_hyperbolic = use_hyperbolic
         
-        # Get config
+        # Handle DataParallel wrapped models
         if isinstance(base_model, nn.DataParallel):
             config = base_model.module.config
         else:
             config = base_model.config
         
         # Get vocab_size
-        if hasattr(config, 'text_config'):
-            self.vocab_size = config.text_config.vocab_size
-        elif hasattr(config, 'vocab_size'):
-            self.vocab_size = config.vocab_size
-        else:
-            self.vocab_size = 32000  # Default
+        self.vocab_size = config.vocab_size if hasattr(config, 'vocab_size') else len(tokenizer)
         
         # Get hidden_size
-        if hasattr(config, 'hidden_size'):
-            self.hidden_size = config.hidden_size
-        elif hasattr(config, 'text_config'):
-            self.hidden_size = config.text_config.hidden_size
-        else:
-            self.hidden_size = 4096  # Default
+        self.hidden_size = config.hidden_size if hasattr(config, 'hidden_size') else 4096
+
+        
+        print(f"Mapping head config: vocab_size={self.vocab_size}, hidden_size={self.hidden_size}")
         
         self.num_layers = num_layers
         self.manifold = CustomLorentz()
 
-        # Multimodal adapter
+        # Multimodal-specific adapter layer to fuse multimodal information
         self.multimodal_adapter = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         
-        # Linear layers and normalization
+        # Linear transforms and normalization
         self.linear1 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.norm1 = nn.LayerNorm(self.hidden_size)
         
+        # Second layer (optional)
         if num_layers >= 2:
             self.linear2 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
             self.norm2 = nn.LayerNorm(self.hidden_size)
         
+        # Third layer (optional) - increase capacity
         if num_layers >= 3:
             self.linear3 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
             self.norm3 = nn.LayerNorm(self.hidden_size)
 
-        # Classifiers
+        # Hyperbolic classifier: num_features is hidden_size+1 (the extra 1 is the time component)
         self.hyp_cls = LorentzMLR(
             self.manifold,
             num_features=self.hidden_size + 1, 
             num_classes=self.vocab_size
         )
+        # Euclidean classifier
         self.euc_cls = nn.Linear(self.hidden_size, self.vocab_size, bias=False)
+
+        print(f"Initialized {'hyperbolic' if use_hyperbolic else 'euclidean'} mapping head, num_layers: {num_layers}")
 
     def lorentz_map(self, x, c_param):
         return expmap0(x, k=c_param, dim=-1)
     
     def forward(self, last_hidden_states, c_param):
-        # Multimodal adaptation
+        # Through multimodal adapter
         x = self.multimodal_adapter(last_hidden_states)
         
         # First layer
@@ -91,20 +219,21 @@ class MultimodalMappingHead(nn.Module):
         x = self.norm1(x)
         x = torch.relu(x)
         
-        # Second layer (if present)
+        # Second layer (if any)
         if self.num_layers >= 2:
             x = self.linear2(x)
             x = self.norm2(x)
             x = torch.relu(x)
         
-        # Third layer (if present)
+        # Third layer (if any)
         if self.num_layers >= 3:
             x = self.linear3(x)
             x = self.norm3(x)
             x = torch.relu(x)
         
-        # Choose classifier based on geometry
+        # Select classifier based on geometry
         if self.use_hyperbolic:
+            # Add time component, then perform hyperbolic mapping
             x = self.manifold.add_time(x)
             hyper_embs = self.lorentz_map(x, c_param)
             logits = self.hyp_cls(hyper_embs)
@@ -113,151 +242,675 @@ class MultimodalMappingHead(nn.Module):
 
         return logits
 
-def load_model():
-    """Load the MLLama-3.2-Vision model"""
-    print("Loading MLLama-3.2-Vision model...")
-    hf_token = "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"
-    model_name = "meta-llama/Llama-3.2-11B-Vision"
-    
-    processor = AutoProcessor.from_pretrained(model_name, token=hf_token)
-    
-    try:
-        # Load MLLama model
-        model = MllamaForConditionalGeneration.from_pretrained(
-            model_name, 
-            token=hf_token,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True
-        ).to(device)
-    except Exception as e:
-        print(f"Error: Failed to load the original model {model_name}")
-        print(f"Details: {e}")
-        print("Please ensure you have sufficient GPU memory and a properly configured environment.")
-        sys.exit(1)
-    
-    # Load Stable Diffusion for image generation
-    print("Loading Stable Diffusion model...")
-    image_gen_model = StableDiffusionPipeline.from_pretrained(
-        "stabilityai/stable-diffusion-2-1",
-        torch_dtype=torch.float16,
-        scheduler=EulerDiscreteScheduler.from_pretrained(
-            "stabilityai/stable-diffusion-2-1", subfolder="scheduler"
-        )
-    ).to(device)
-    
-    return processor, model, image_gen_model
+# Image transforms - normalization suitable for MLLama
+transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+])
 
-def load_checkpoint(checkpoint_path, model, lora_dir=""):
-    """Load the trained checkpoint"""
-    print(f"Loading checkpoint: {checkpoint_path}")
+# ====================== Load the COCO dataset ======================
+print(f"{'='*40}\nLoading the COCO dataset\n{'='*40}")
+
+try:
+    from pycocotools.coco import COCO
+    
+    # Set COCO dataset paths
+    data_dir = 'coco_dataset'
+    train_annotations = os.path.join(data_dir, 'annotations/captions_train2017.json')
+    val_annotations = os.path.join(data_dir, 'annotations/captions_val2017.json')
+    train_image_dir = os.path.join(data_dir, 'train2017')
+    val_image_dir = os.path.join(data_dir, 'val2017')
+    
+    # Check dataset files
+    if not os.path.exists(train_annotations) or not os.path.exists(train_image_dir):
+        raise FileNotFoundError(f"COCO dataset files not found. Please make sure the dataset is downloaded to the {data_dir} directory")
+    
+    # Load COCO API
+    print("Loading COCO training annotations...")
+    train_coco = COCO(train_annotations)
+    print("Loading COCO validation annotations...")
+    val_coco = COCO(val_annotations)
+    
+    # Get all image IDs
+    train_ids = list(train_coco.imgs.keys())
+    val_ids = list(val_coco.imgs.keys())
+    
+    # Split validation into val/test
+    random.shuffle(val_ids)
+    val_split = int(len(val_ids) * 0.5)
+    new_val_ids = val_ids[:val_split]
+    test_ids = val_ids[val_split:]
+    
+    if MAX_SAMPLES and MAX_SAMPLES > 0:
+        train_ids = train_ids[:MAX_SAMPLES]
+        new_val_ids = new_val_ids[:MAX_SAMPLES//5]
+        test_ids = test_ids[:MAX_SAMPLES//5]
+    
+    print(f"Dataset size - train: {len(train_ids)} images, val: {len(new_val_ids)} images, test: {len(test_ids)} images")
+    
+    # COCO dataset class
+    class COCODataset(Dataset):
+        def __init__(self, coco, img_ids, img_dir, max_length=128):
+            self.coco = coco
+            self.img_ids = img_ids
+            self.img_dir = img_dir
+            self.max_length = max_length
+            
+        def __len__(self):
+            return len(self.img_ids)
+        
+        def __getitem__(self, idx):
+            # Get image ID and path
+            img_id = self.img_ids[idx]
+            img_info = self.coco.loadImgs(img_id)[0]
+            img_path = os.path.join(self.img_dir, img_info['file_name'])
+            
+            # Load image
+            try:
+                image = Image.open(img_path).convert('RGB')
+            except Exception as e:
+                print(f"Unable to load image {img_path}: {e}")
+                # Create a blank image as a fallback
+                image = Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE), color='black')
+            
+            # Get caption(s)
+            ann_ids = self.coco.getAnnIds(imgIds=img_id)
+            anns = self.coco.loadAnns(ann_ids)
+            
+            # Randomly select one caption
+            caption = random.choice([ann['caption'] for ann in anns]) if anns else "No description"
+            
+            # Square image processing (keep aspect ratio)
+            w, h = image.size
+            if w > h:
+                new_w = IMAGE_SIZE
+                new_h = int(h * IMAGE_SIZE / w)
+            else:
+                new_h = IMAGE_SIZE
+                new_w = int(w * IMAGE_SIZE / h)
+                    
+            image = image.resize((new_w, new_h), Image.LANCZOS)
+            
+            # Create square canvas
+            square_img = Image.new('RGB', (IMAGE_SIZE, IMAGE_SIZE), color=(0, 0, 0))
+            paste_x = (IMAGE_SIZE - new_w) // 2
+            paste_y = (IMAGE_SIZE - new_h) // 2
+            square_img.paste(image, (paste_x, paste_y))
+            
+            return {
+                "image": square_img,
+                "caption": caption,
+                "image_id": img_id
+            }
+
+    def collate_fn(batch):
+        images = [item["image"] for item in batch]
+        captions = [item["caption"] for item in batch]
+        image_ids = [item["image_id"] for item in batch]
+            
+        return {
+            "image": images,
+            "caption": captions,
+            "image_id": image_ids
+        }
+    
+    # Create datasets
+    train_dataset = COCODataset(train_coco, train_ids, train_image_dir, max_length=MAX_LENGTH)
+    val_dataset = COCODataset(val_coco, new_val_ids, val_image_dir, max_length=MAX_LENGTH)
+    test_dataset = COCODataset(val_coco, test_ids, val_image_dir, max_length=MAX_LENGTH)
+    
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=True,
+        num_workers=4,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
+        collate_fn=collate_fn
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False,
+        num_workers=4,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
+        collate_fn=collate_fn
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False,
+        num_workers=4,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
+        collate_fn=collate_fn
+    )
+    
+    print(f"Dataloaders created successfully! Batch size: {BATCH_SIZE}")
+    
+except Exception as e:
+    print(f"Failed to load COCO dataset: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+# ==================== Helper functions ====================
+def prepare_multimodal_inputs_batch(batch, processor):
+    """Process images and texts for the entire batch"""
+    batch_size = len(batch["image"])
+    all_inputs = []
+    
+    # Ensure temp dir exists
+    os.makedirs("temp_images", exist_ok=True)
+    
+    for i in range(batch_size):
+        image = batch["image"][i]
+        caption = batch["caption"][i]
+        
+        # Save image to a temp file - use index to ensure uniqueness
+        temp_img_path = f"temp_images/temp_{time.time()}_{i}.jpg"
+        image.save(temp_img_path)
+        
+        # Build conversation
+        conversation = [
+            {
+                "role": "<|User|>",
+                "content": "<image_placeholder>\nDescribe this image",
+                "images": [temp_img_path],
+            },
+            {"role": "<|Assistant|>", "content": caption},
+        ]
+        
+        # Process images and conversation
+        pil_images = load_pil_images(conversation)
+        input_data = processor(
+            conversations=conversation,
+            images=pil_images,
+            force_batchify=True
+        )
+        
+        # Append processed input
+        all_inputs.append(input_data)
+        
+        # Clean up temp file
+        if os.path.exists(temp_img_path):
+            os.remove(temp_img_path)
+    
+    # Combine processed inputs
+    if len(all_inputs) == 0:
+        raise ValueError("No valid inputs in batch")
+    
+    # Merge into one batch
+    return batch_combine_inputs(all_inputs)
+
+def batch_combine_inputs(input_list):
+    """Merge a list of processed inputs into one batch, handling variable-length sequences"""
+    if len(input_list) == 1:
+        return input_list[0]
+    
+    # Use the first input's keys as reference
+    keys = input_list[0].keys()
+    combined = {}
+    
+    for key in keys:
+        if isinstance(input_list[0][key], torch.Tensor):
+            # Handle potential variable-length tensors
+            if input_list[0][key].dim() > 1:
+                tensors = [inp[key] for inp in input_list]
+                shapes = [t.shape for t in tensors]
+                
+                # Check if all shapes (beyond batch dim) are equal
+                if not all(s[1:] == shapes[0][1:] for s in shapes):
+                    # Need padding - find max per-dim
+                    max_dims = []
+                    for dim in range(1, len(shapes[0])):
+                        max_dims.append(max(s[dim] for s in shapes))
+                    
+                    padded_tensors = []
+                    for tensor in tensors:
+                        # Compute required padding per dim
+                        pad_sizes = []
+                        for dim in range(1, len(tensor.shape)):
+                            pad_sizes.extend([0, max_dims[dim-1] - tensor.shape[dim]])
+                        
+                        # If any padding needed
+                        if any(p > 0 for p in pad_sizes):
+                            # Right-to-left padding (as required by PyTorch)
+                            padded = torch.nn.functional.pad(tensor, pad_sizes, 'constant', 0)
+                            padded_tensors.append(padded)
+                        else:
+                            padded_tensors.append(tensor)
+                    
+                    combined[key] = torch.cat(padded_tensors, dim=0)
+                else:
+                    # Same shapes, simple concat
+                    combined[key] = torch.cat(tensors, dim=0)
+            else:
+                # 1D tensors: direct concat
+                combined[key] = torch.cat([inp[key] for inp in input_list], dim=0)
+        elif key in ['pixel_values', 'images_emb_mask', 'images_seq_mask']:
+            # Special handling for image-related tensors
+            try:
+                combined[key] = torch.cat([inp[key] for inp in input_list], dim=0)
+            except RuntimeError as e:
+                print(f"Inconsistent image tensor shapes: {e}, attempting padding...")
+                tensors = [inp[key] for inp in input_list]
+                shapes = [t.shape for t in tensors]
+                print(f"Shapes across samples: {shapes}")
+                
+        else:
+            # Non-tensor fields remain as lists
+            combined[key] = [inp[key] for inp in input_list]
+    
+    return combined
+
+def prepare_labels(batch):
+    """Prepare training labels"""
+    input_ids = batch["input_ids"].clone()
+    
+    labels = torch.roll(input_ids, shifts=1, dims=1)
+    labels[:, 0] = -100  # Ignore the first position
+    
+    # Mask padding tokens in labels
+    padding_mask = (input_ids == tokenizer.pad_token_id)
+    labels[padding_mask] = -100
+    
+    return labels
+
+def compute_lm_loss(logits, labels):
+    """Compute language modeling loss"""
+    loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+    vocab_size = logits.size(-1)
+    logits_2d = logits.view(-1, vocab_size)
+    labels_2d = labels.view(-1)
+    loss = loss_fct(logits_2d, labels_2d)
+    return loss
+
+def get_gpu_memory_stats():
+    """Get GPU memory usage"""
+    if not torch.cuda.is_available():
+        return "GPU not available"
+    
+    stats = []
+    for i in range(torch.cuda.device_count()):
+        allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)  # GB
+        reserved = torch.cuda.memory_reserved(i) / (1024 ** 3)    # GB
+        stats.append(f"GPU{i}: {allocated:.1f}GB/{reserved:.1f}GB")
+    
+    return " | ".join(stats)
+
+# =========== Initialize model components ===========
+custom_lm_head = MultimodalMappingHead(model, use_hyperbolic=USE_HYPERBOLIC, num_layers=3).to(device)
+learnable_curvature = nn.Parameter(torch.tensor(0.1, dtype=torch.float32, device=device))
+
+# ========= Build optimizer and scheduler ===========
+optimizer = torch.optim.AdamW([
+    {"params": list(custom_lm_head.parameters()), "lr": BASE_LR},
+    {"params": [learnable_curvature], "lr": CURVATURE_LR}
+] + ([{"params": [p for p in model.parameters() if p.requires_grad], "lr": BASE_LR}] if USE_LORA else []))
+
+# Compute training steps
+num_training_steps = len(train_loader) * NUM_EPOCHS
+num_warmup_steps = int(0.1 * num_training_steps)
+scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
+
+best_loss = float("inf")
+
+# Enhanced training metrics logger
+def log_metrics(epoch, avg_loss, ppl, elapsed_time):
+    """Log detailed training metrics for each epoch"""
+    current_lr = optimizer.param_groups[0]['lr']
+    gpu_stats = get_gpu_memory_stats() if torch.cuda.is_available() else "N/A"
+    
+    print(f"\n{'='*50}")
+    print(f"Epoch {epoch} summary (elapsed: {elapsed_time:.2f}s)")
+    print(f"{'='*50}")
+    print(f"Train loss: {avg_loss:.4f}")
+    print(f"Perplexity (PPL): {ppl:.2f}")
+    print(f"Learning rate: {current_lr:.2e}")
+    print(f"Hyperbolic curvature: {learnable_curvature.item():.4f}")
+    print(f"GPU memory: {gpu_stats}")
+    print(f"Avg time per batch: {elapsed_time/len(train_loader):.3f}s")
+    print(f"Est. next epoch time: {elapsed_time/60:.1f} min")
+    print(f"{'='*50}")
+
+def save_model_for_hf(model, custom_lm_head, curvature, output_dir, processor=None):
+    """Save the model in HuggingFace-compatible format"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 1) Save base model
+    if isinstance(model, nn.DataParallel):
+        base_model = model.module
+    else:
+        base_model = model
+    
+    # Save base model and config
+    base_model.save_pretrained(output_dir)
+    
+    # Save processor if provided
+    if processor is not None:
+        processor.save_pretrained(output_dir)
+    
+    # 2) Update config.json with hyperbolic mapping info
+    config_path = os.path.join(output_dir, "config.json")
+    if os.path.exists(config_path):
+        import json
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        config["hyperbolic_mapping"] = {
+            "enabled": USE_HYPERBOLIC,
+            "curvature": float(curvature.item()),
+            "num_layers": custom_lm_head.num_layers,
+            "model_type": "janus-hyperbolic" if USE_HYPERBOLIC else "janus-euclidean"
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+    
+    # 3) Save custom head and curvature
+    custom_head_path = os.path.join(output_dir, "hyperbolic_mapping_head.bin")
+    torch.save({
+        "lm_head_state": custom_lm_head.state_dict(),
+        "curvature": curvature.item(),
+        "use_hyperbolic": USE_HYPERBOLIC,
+        "hidden_size": custom_lm_head.hidden_size,
+        "vocab_size": custom_lm_head.vocab_size,
+        "num_layers": custom_lm_head.num_layers
+    }, custom_head_path)
+    
+    print(f"HuggingFace-format model saved to: {output_dir}")
+
+    return output_dir
+
+def save_model(epoch, loss, ppl):
+    """Save the model every epoch and also save a HuggingFace-format snapshot"""
+    global best_loss
+    model_type = "hyp" if USE_HYPERBOLIC else "euc"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_dir = f"./checkpoints/{model_type}"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Track best model
+    is_best = loss < best_loss
+    if is_best:
+        best_loss = loss
+    
+    # Always save current epoch (raw format)
+    filename = f"{model_type}_vision_epoch_{epoch}_loss_{loss:.4f}_PPL_{ppl:.2f}{'_best' if is_best else ''}.pth"
+    save_path = os.path.join(save_dir, filename)
+    
+    torch.save({
+        "lm_head_state": custom_lm_head.state_dict(),
+        "curvature": learnable_curvature.item(),
+        "epoch": epoch,
+        "loss": loss,
+        "ppl": ppl,
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict()
+    }, save_path)
+    
+    if USE_LORA:
+        lora_save_path = os.path.join(save_dir, f"lora_{model_type}_epoch_{epoch}")
+        if isinstance(model, nn.DataParallel):
+            model.module.save_pretrained(lora_save_path)
+        else:
+            model.save_pretrained(lora_save_path)
+    
+    # Save HF-format snapshot for best or every 5 epochs
+    if is_best or (epoch % 5 == 0):
+        hf_dir = f"./hf_models/{model_type}_epoch_{epoch}"
+        save_model_for_hf(
+            model=model,
+            custom_lm_head=custom_lm_head,
+            curvature=learnable_curvature,
+            output_dir=hf_dir,
+            processor=processor
+        )
+        print(f"Also saved HuggingFace format: {hf_dir}")
+    
+    print(f"Checkpoint saved: {save_path}")
+    return save_path
+
+
+def load_checkpoint(checkpoint_path):
+    """Load checkpoint to resume training"""
+    print(f"Resuming from checkpoint: {checkpoint_path}")
+    
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        raise FileNotFoundError(f"Checkpoint file does not exist: {checkpoint_path}")
     
     # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Check if it's a hyperbolic model
-    is_hyperbolic = "hyp" in os.path.basename(checkpoint_path)
-    
-    # Create and load custom head
-    custom_lm_head = MultimodalMappingHead(model, use_hyperbolic=is_hyperbolic, num_layers=3).to(device)
+    # Restore custom head
     custom_lm_head.load_state_dict(checkpoint["lm_head_state"])
     
-    # Load curvature parameter
-    curvature = torch.tensor(checkpoint["curvature"], device=device)
+    # Restore curvature
+    with torch.no_grad():
+        learnable_curvature.copy_(torch.tensor(checkpoint["curvature"], device=device))
     
-    # Load LoRA weights (if specified)
-    if lora_dir and os.path.exists(lora_dir):
-        print(f"Loading LoRA weights: {lora_dir}")
-        if isinstance(model, nn.DataParallel):
-            model.module.load_adapter(lora_dir)
-        else:
-            model.load_adapter(lora_dir)
-    elif "lora" in checkpoint_path.lower():
-        # Try to locate LoRA in the checkpoint path
-        parent_dir = os.path.dirname(checkpoint_path)
-        lora_dirs = [d for d in os.listdir(parent_dir) if d.startswith("lora_")]
+    # Restore optimizer
+    if "optimizer_state" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        # Ensure optimizer tensors are on the correct device
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+    
+    # Restore scheduler
+    if "scheduler_state" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+    
+    # Restore LoRA params (if any)
+    if USE_LORA and os.path.dirname(checkpoint_path):
+        lora_dir = os.path.dirname(checkpoint_path)
+        # Find a relevant LoRA dir
+        lora_dirs = [d for d in os.listdir(lora_dir) if d.startswith("lora_")]
         if lora_dirs:
             newest_lora = sorted(lora_dirs)[-1]
-            lora_path = os.path.join(parent_dir, newest_lora)
-            print(f"Automatically loading LoRA weights: {lora_path}")
+            lora_path = os.path.join(lora_dir, newest_lora)
+            print(f"Loading LoRA weights: {lora_path}")
             if isinstance(model, nn.DataParallel):
                 model.module.load_adapter(lora_path)
             else:
                 model.load_adapter(lora_path)
     
-    return custom_lm_head, curvature, is_hyperbolic
+    # Return resumed epoch and loss
+    return checkpoint.get("epoch", 0), checkpoint.get("loss", float("inf"))
 
-def generate_text_from_image(image_path, model, processor, custom_lm_head, curvature, max_len=100):
-    """Generate text from image"""
+
+# ====================== Train the model ======================
+gradient_accumulation_steps = 4
+def train_model():
+    global best_loss
+    latest_checkpoint_path = None
+    log_interval = 500  # Show averaged loss every N batches
+    
+    start_epoch = args.start_epoch
+    if args.resume:
+        loaded_epoch, loaded_loss = load_checkpoint(args.resume)
+        if loaded_epoch > 0:
+            start_epoch = loaded_epoch + 1
+            best_loss = min(best_loss, loaded_loss)
+            print(f"Successfully resumed to epoch {loaded_epoch}, continuing from epoch {start_epoch}")
+    
+    for epoch in range(1, NUM_EPOCHS + 1):
+        model.train()
+        custom_lm_head.train()
+        epoch_start_time = time.time()
+        total_loss, count = 0.0, 0
+        recent_losses = []  # Track recent batch losses
+        
+        # Zero grads outside loop
+        optimizer.zero_grad()
+        
+        # Clear cache each epoch
+        torch.cuda.empty_cache()
+
+        for i, batch in enumerate(tqdm(train_loader, desc=f"Training epoch {epoch}", 
+                                      bar_format='{l_bar}{bar:30}{r_bar}')):
+
+            # Prepare multimodal inputs
+            inputs = prepare_multimodal_inputs_batch(batch, processor)
+            
+            # Move to device
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+            labels = prepare_labels(inputs)
+            
+            # (Updated call path in train_model and evaluate_model)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                inputs_embeds = model.language_model.get_input_embeddings()(inputs["input_ids"])
+                
+                # Call internal model
+                outputs = model.language_model.model(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=inputs["attention_mask"],
+                    use_cache=False
+                )
+                
+                # Get last hidden state
+                hidden_states = outputs.last_hidden_state
+                
+                # Custom head
+                logits = custom_lm_head(hidden_states, learnable_curvature)
+                raw_loss = compute_lm_loss(logits, labels)
+                loss = raw_loss / gradient_accumulation_steps
+            # Backprop
+            loss.backward()
+            
+            # Per-batch metrics
+            batch_size = len(batch["image"])
+            item_loss = raw_loss.item()
+            recent_losses.append(item_loss)
+            total_loss += item_loss * batch_size
+            count += batch_size
+            
+            # Periodic logging
+            if (i + 1) % log_interval == 0:
+                avg_recent_loss = sum(recent_losses[-log_interval:]) / min(log_interval, len(recent_losses))
+                lr = optimizer.param_groups[0]['lr']
+                print(f"Batch {i+1}/{len(train_loader)}, Loss: {avg_recent_loss:.4f}, LR: {lr:.1e}, Curvature: {learnable_curvature.item():.4f}")
+            
+            # Optim step on accumulation
+            if (i + 1) % gradient_accumulation_steps == 0 or i == len(train_loader) - 1:
+                # Clip grads
+                clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad] + 
+                    list(custom_lm_head.parameters()) + 
+                    [learnable_curvature], 
+                    max_norm=1.0
+                )
+                
+                # Step
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                
+                # Clamp curvature range
+                with torch.no_grad():
+                    learnable_curvature.clamp_(1e-3, 1e1)
+            
+            # Occasionally clear CUDA cache to reduce fragmentation
+            if (i + 1) % (gradient_accumulation_steps * 10) == 0:
+                torch.cuda.empty_cache()
+                
+            # Periodic evaluation
+            if (i + 1) % args.eval_steps == 0:
+                print("\nRunning interim evaluation...")
+                interim_loss = evaluate_model(val_loader, phase="Interim validation", max_batches=50)
+                print(f"Interim validation loss: {interim_loss:.4f}")
+                # Back to train
+                model.train()
+                custom_lm_head.train()
+
+        # Epoch metrics
+        avg_loss = total_loss / count if count > 0 else 9999.0
+        ppl = math.exp(avg_loss) if avg_loss < 20 else float("inf")
+        epoch_time = time.time() - epoch_start_time
+        
+        # Epoch summary
+        log_metrics(epoch, avg_loss, ppl, epoch_time)
+        
+        # Full validation
+        print("\nStarting full validation...")
+        val_loss = evaluate_model(val_loader, phase="Validation")
+        latest_checkpoint_path = save_model(epoch, val_loss, math.exp(val_loss) if val_loss < 20 else float("inf"))
+        # Save model
+        print(f"Saved checkpoint for epoch {epoch}: {latest_checkpoint_path}")
+
+# ====================== Evaluation ======================
+def evaluate_model(data_loader, phase="Validation", max_batches=None):
     model.eval()
     custom_lm_head.eval()
+    total_loss, count = 0.0, 0
+    start_time = time.time()
     
-    # Load image
-    if image_path.startswith('http'):
-        response = requests.get(image_path)
-        image = Image.open(BytesIO(response.content))
-    else:
-        image = Image.open(image_path)
-    
-    # Process image
-    inputs = processor(images=image, text="Describe this image:", return_tensors="pt").to(device)
-    
-    # Generate text
     with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_length=max_len,
-            do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
-        )
-    
-    # Decode output
-    generated_text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
-    return generated_text
+        for i, batch in enumerate(tqdm(data_loader, desc=f"Evaluating {phase}", 
+                                     bar_format='{l_bar}{bar:30}{r_bar}')):
+            if max_batches and i >= max_batches:
+                break
+                
+            # Prepare inputs
+            inputs = prepare_multimodal_inputs_batch(batch, processor)
+            
+            # Move to device
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}            
+            # Prepare labels
+            labels = prepare_labels(inputs)
+            
+            # Forward pass with autocast
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                inputs_embeds = model.language_model.get_input_embeddings()(inputs["input_ids"])
+                
+                # Call internal model
+                outputs = model.language_model.model(
+                    inputs_embeds=inputs_embeds,
+                    attention_mask=inputs["attention_mask"],
+                    use_cache=False
+                )
+                
+                # Get last hidden state
+                hidden_states = outputs.last_hidden_state
+                
+                # Custom head
+                logits = custom_lm_head(hidden_states, learnable_curvature)
+                loss = compute_lm_loss(logits, labels) 
+            
+            batch_size = len(batch["image"])
+            total_loss += loss.item() * batch_size
+            count += batch_size
+        
+        # Evaluation summary
+        eval_time = time.time() - start_time
+        avg_loss = total_loss / count if count > 0 else float("inf")
+        ppl = math.exp(avg_loss) if avg_loss < 20 else float("inf")
+        
+        print(f"{phase} results: Loss={avg_loss:.4f}, PPL={ppl:.2f}, Time={eval_time:.2f}s")
+        return avg_loss
 
-def generate_image_from_text(text_prompt, image_gen_model, output_path=None):
-    """Generate image from text"""
-    with torch.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", 
-                      dtype=torch.float16):
-        image = image_gen_model(text_prompt, guidance_scale=7.5).images[0]
-    
-    if output_path:
-        image.save(output_path)
-    
-    return image
 
-# Main function
-def main():
-    # Load models
-    processor, model, image_gen_model = load_model()
-    
-    # Load checkpoint
-    custom_lm_head, curvature, is_hyperbolic = load_checkpoint(
-        args.checkpoint, model, args.lora_dir
-    )
-    
-    print(f"{'='*50}")
-    print(f"Model loaded - Geometry: {'Hyperbolic' if is_hyperbolic else 'Euclidean'}, Curvature: {curvature.item():.4f}")
-    print(f"{'='*50}")
-    
-    # Image-to-text
-    if args.image:
-        print(f"\n=== Generating text from image ===")
-        generated_text = generate_text_from_image(
-            args.image, model, processor, custom_lm_head, curvature
-        )
-        print(f"Image path: {args.image}")
-        print(f"Generated description: {generated_text}")
-    
-    # Text-to-image
-    if args.text:
-        print(f"\n=== Generating image from text ===")
-        output_path = "generated_image.jpg"
-        generate_image_from_text(args.text, image_gen_model, output_path)
-        print(f"Prompt text: {args.text}")
-        print(f"Generated image saved to: {output_path}")
-
+# ====================== Main ======================
+# ====================== Main ======================
 if __name__ == "__main__":
-    main()
+    print(f"{'='*50}")
+    print(f"Config: Janus-Pro model, hyperbolic={USE_HYPERBOLIC}, LoRA={USE_LORA}, batch={BATCH_SIZE}")
+    print(f"LR={BASE_LR}, curvature LR={CURVATURE_LR}, device={DEVICE}")
+    print(f"{'='*50}")
+    
+    # Use args.mode; remove duplicate arg parsing
+    if args.mode == "train":
+        # Training mode
+        print("Starting training...")
+        train_model()
+    
+    elif args.mode == "eval":
+        # Evaluation mode
+        print("Starting evaluation...")
+        evaluate_model(test_loader, phase="Test")
