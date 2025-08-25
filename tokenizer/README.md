@@ -232,6 +232,9 @@ Artifacts are written under `--output_dir` in subfolders like `reconstructions/`
 - NaNs/Inf: monitors will report layers/gradients. Consider smaller LR, stronger grad clipping, or enabling curvature adaptation.
 - Very low code usage: increase diversity weight (`--lambda_diversity`) or consider polar tokenizers.
 
-## Acknowledgements
+## ## Current Status and Known Issues
 
-This code leverages geoopt for Riemannian optimization, torchvision for VGG perceptual features, and standard scientific Python tools for analysis/visualization.
+- The intended hyperbolic tokenizer is not finalized. Current experiments initialize from a pretrained AE and train VQ-VAE by tuning existing loss weights.
+- Severe issue observed: the codebook distribution becomes too narrow (average radius shrinks over training), leading to color desaturation/monotony and eventual training collapse.
+- Early training can already yield coarse reconstructions, but instability increases as the codebook concentrates.
+- Because of the above, statements implying a complete tokenizer are removed or toned down in this README. Treat tokenizer components as experimental.
